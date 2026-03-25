@@ -1,0 +1,19 @@
+{
+    "providers": [
+        {
+            "name": "local",
+            "base_url": "http://localhost:11434/v1",
+            "api_key": null,
+            "model": "qwen2.5",
+            "tier": "local",
+            "max_tokens": 4096,
+            "temperature": 0.3,
+            "timeout": 120,
+            "is_fallback": false
+        }
+    ],
+    "default_provider": "local",
+    "auto_tier": "local",
+    "max_retries": 3,
+    "json_retry_attempts": 2
+}

@@ -1,0 +1,62 @@
+version: '3.9'
+
+services:
+  # DOC-MCP Service - Document operations
+  doc-mcp:
+    build:
+      context: .
+      dockerfile: doc-mcp-service/Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./.data:/app/.data  # Shared SQLite database and persistence
+    environment:
+      - DOC_MCP_HOST=0.0.0.0
+      - DOC_MCP_PORT=8001
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Agent Backend - AI agent with LLM integration
+  agent-backend:
+    build:
+      context: .
+      dockerfile: agent-backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./.data:/app/.data  # Shared SQLite database and persistence
+    environment:
+      - AGENT_HOST=0.0.0.0
+      - AGENT_PORT=8000
+      - AGENT_DOC_MCP_URL=http://doc-mcp:8001/api/v1
+      - AGENT_LLM_CONFIG_PATH=/app/config/llm_config.json
+      - DATABASE_URL=sqlite:///.data/docpilot.db
+      - EVENT_BUS_TYPE=memory
+    env_file:
+      - .env
+    depends_on:
+      doc-mcp:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Redis for event bus scaling (uncomment when scaling)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+
+volumes: {}

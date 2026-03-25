@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DocPilot</title>
+    <link rel="stylesheet" href="taskpane.css" />
+    <script src="https://appsforoffice.microsoft.com/lib/1.1/hosted/office.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                    <polyline points="14,2 14,8 20,8"/>
+                    <path d="M8 13h8M8 17h8M8 9h2"/>
+                </svg>
+                <span class="header-title">DocPilot</span>
+            </div>
+            <div class="header-status" id="connectionStatus" title="Checking connection...">
+                <span class="status-dot"></span>
+            </div>
+        </header>
+
+        <!-- Settings Bar -->
+        <div class="settings-bar">
+            <div class="setting-group">
+                <label class="setting-label">Mode</label>
+                <div class="toggle-group" id="modeToggle">
+                    <button class="toggle-btn active" data-value="preserve" title="Rewrite while keeping formatting">
+                        <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M2 2h12v2H2zM2 6h8v2H2zM2 10h10v2H2zM2 14h6v2H2z"/></svg>
+                        Preserve
+                    </button>
+                    <button class="toggle-btn" data-value="rebuild" title="Generate document from scratch">
+                        <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 1l7 4v6l-7 4-7-4V5z"/></svg>
+                        Rebuild
+                    </button>
+                </div>
+            </div>
+            <div class="setting-group">
+                <label class="setting-label">Model</label>
+                <select id="modelSelect" class="select-input">
+                    <option value="auto">Auto</option>
+                    <option value="local">Local</option>
+                    <option value="fast">Fast</option>
+                    <option value="quality">Quality</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="actions-bar">
+            <button class="action-btn" data-action="rewrite" title="Rewrite the document">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M12.146.854a.5.5 0 0 1 .708 0l2.292 2.292a.5.5 0 0 1 0 .708L5.854 13.146a.5.5 0 0 1-.354.146H3.5a.5.5 0 0 1-.5-.5v-2a.5.5 0 0 1 .146-.354L12.146.854z"/></svg>
+                Rewrite
+            </button>
+            <button class="action-btn" data-action="improve" title="Improve writing quality">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 0l2 6h6l-5 4 2 6-5-4-5 4 2-6-5-4h6z"/></svg>
+                Improve
+            </button>
+            <button class="action-btn" data-action="tailor_cv" title="Tailor CV for a job">
+                <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 14s-1 0-1-1 1-4 7-4 7 3 7 4-1 1-1 1H2z"/></svg>
+                Tailor CV
+            </button>
+        </div>
+
+        <!-- Chat Messages -->
+        <div class="chat-container" id="chatContainer">
+            <div class="welcome-message" id="welcomeMessage">
+                <div class="welcome-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">
+                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                        <path d="M12 18v-6M9 15l3 3 3-3"/>
+                    </svg>
+                </div>
+                <h3>Welcome to DocPilot</h3>
+                <p>Your AI-powered document assistant. Use the action buttons above or type a message to get started.</p>
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="input-area">
+            <div class="input-wrapper">
+                <textarea
+                    id="userInput"
+                    class="chat-input"
+                    placeholder="Describe what you'd like to do with your document..."
+                    rows="2"
+                ></textarea>
+                <button id="sendBtn" class="send-btn" title="Send message">
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="input-hint">
+                <span>Press <kbd>Ctrl+Enter</kbd> to send</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="taskpane.js"></script>
+</body>
+</html>
