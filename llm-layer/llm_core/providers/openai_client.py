@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Optional
 
 import httpx
@@ -26,9 +27,15 @@ class LLMClient:
 
     def __init__(self, provider: ProviderConfig):
         self.provider = provider
+        
+        # SSL verification: Use True for production, but allow disable in development via env var
+        # This is needed because some dev environments (Windows with self-signed certs) may have SSL issues
+        verify_ssl = os.getenv("LLM_VERIFY_SSL", "true").lower() in ("true", "1", "yes")
+        
         self._client = httpx.AsyncClient(
             base_url=provider.base_url.rstrip("/"),
             timeout=httpx.Timeout(provider.timeout, connect=10.0),
+            verify=verify_ssl,  # SSL verification (True for production, can disable for dev)
         )
 
     async def close(self):
@@ -49,7 +56,13 @@ class LLMClient:
         }
 
         if request.json_mode:
-            payload["response_format"] = {"type": "json_object"}
+            if request.json_schema and self.provider.supports_json_schema:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": request.json_schema
+                }
+            else:
+                payload["response_format"] = {"type": "json_object"}
 
         headers = {"Content-Type": "application/json"}
         if self.provider.api_key:

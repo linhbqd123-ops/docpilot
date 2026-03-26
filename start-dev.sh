@@ -44,9 +44,24 @@ sleep 2
 
 echo -e "${BLUE}[3/3]${NC} Starting Frontend Dev Server (port 3000)..."
 cd "$ROOT/frontend"
-npx http-server . -p 3000 --cors &
+npx office-addin-dev-certs install
+mkdir -p .office-addin-dev-certs
+cp ~/.office-addin-dev-certs/* .office-addin-dev-certs/ 2>/dev/null || true
+npx http-server . -p 3000 -S -C .office-addin-dev-certs/localhost.crt -K .office-addin-dev-certs/localhost.key --cors &
 FRONTEND_PID=$!
 cd "$ROOT"
+
+echo
+echo "===== All services started! ====="
+echo
+echo "  DOC-MCP Service:  http://localhost:8001"
+echo "  Agent Backend:     http://localhost:8000"
+echo "  Frontend:          https://localhost:3000"
+echo
+echo "  API Docs:"
+echo "    DOC-MCP:  http://localhost:8001/docs"
+echo "    Agent:    http://localhost:8000/docs"
+echo
 
 echo
 echo -e "${GREEN}===== All services started! =====${NC}"

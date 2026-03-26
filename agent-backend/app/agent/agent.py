@@ -18,7 +18,10 @@ from typing import Optional
 from app.prompts.templates import (
     SYSTEM_PROMPT,
     CLASSIFY_INTENT_PROMPT,
+    CLASSIFY_INTENT_SCHEMA,
+    PRESERVE_CHANGES_SCHEMA,
     PRESERVE_REWRITE_PROMPT,
+    REBUILD_BLOCKS_SCHEMA,
     REBUILD_GENERATION_PROMPT,
     IMPROVE_PROMPT,
     TAILOR_CV_PROMPT,
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentMode(str, Enum):
+    AUTO = "auto"
     PRESERVE = "preserve"
     REBUILD = "rebuild"
 
@@ -86,7 +90,12 @@ class DocPilotAgent:
         action: Optional[str] = None,
         provider_name: Optional[str] = None,
     ) -> AgentResult:
-        """Main agent loop.
+        """Main agent loop (auto mode).
+
+        The agent automatically determines the best approach based on user intent:
+        - Action-based: Uses provided action (rewrite, improve, tailor_cv, generate)
+        - Intent-based: Uses LLM to classify intent if no action specified
+        - Always follows user prompt - mode is just implementation detail
 
         Steps:
         1. Extract document structure
@@ -104,12 +113,8 @@ class DocPilotAgent:
 
             # Step 2: Determine intent and mode
             intent, detected_mode = await self._classify_intent(
-                user_message, blocks, action
+                user_message, blocks, action, mode
             )
-
-            # Override mode if explicitly set
-            if mode:
-                detected_mode = mode
 
             logger.info(f"Agent intent: {intent}, mode: {detected_mode}")
 
@@ -144,9 +149,18 @@ class DocPilotAgent:
             )
 
     async def _classify_intent(
-        self, user_message: str, blocks: list[dict], explicit_action: Optional[str]
+        self, user_message: str, blocks: list[dict], explicit_action: Optional[str], explicit_mode: Optional[str]
     ) -> tuple[AgentIntent, AgentMode]:
         """Classify the user's intent and determine the mode."""
+
+        # Use explicit mode if provided (unless auto)
+        if explicit_mode and explicit_mode != "auto":
+            try:
+                user_mode = AgentMode(explicit_mode)
+            except ValueError:
+                user_mode = AgentMode.PRESERVE  # fallback
+        else:
+            user_mode = None
 
         # Use explicit action if provided
         if explicit_action:
@@ -157,11 +171,14 @@ class DocPilotAgent:
                 "generate": (AgentIntent.GENERATE, AgentMode.REBUILD),
                 "rebuild": (AgentIntent.REWRITE, AgentMode.REBUILD),
             }
-            return action_map.get(
+            intent, default_mode = action_map.get(
                 explicit_action, (AgentIntent.REWRITE, AgentMode.PRESERVE)
             )
+            # Override mode if user specified
+            mode = user_mode or default_mode
+            return intent, mode
 
-        # Use LLM to classify
+        # Use LLM to classify if no explicit action
         doc_summary = f"{len(blocks)} blocks" if blocks else "empty document"
 
         prompt = CLASSIFY_INTENT_PROMPT.format(
@@ -174,15 +191,18 @@ class DocPilotAgent:
                 LLMRequest(
                     messages=[{"role": "user", "content": prompt}],
                     system_prompt=SYSTEM_PROMPT,
-                )
+                ),
+                json_schema=CLASSIFY_INTENT_SCHEMA
             )
 
             intent = AgentIntent(result.get("intent", "rewrite"))
-            mode = AgentMode(result.get("mode", "preserve"))
+            detected_mode = AgentMode(result.get("mode", "preserve"))
+            # Override mode if user specified
+            mode = user_mode or detected_mode
             return intent, mode
         except Exception as e:
             logger.warning(f"Intent classification failed, defaulting: {e}")
-            return AgentIntent.REWRITE, AgentMode.PRESERVE
+            return AgentIntent.REWRITE, user_mode or AgentMode.PRESERVE
 
     async def _handle_chat(
         self, user_message: str, blocks_json: str, provider_name: Optional[str]
@@ -218,7 +238,8 @@ class DocPilotAgent:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
-            )
+            ),
+            json_schema=PRESERVE_CHANGES_SCHEMA
         )
 
         changes = result.get("changes", [])
@@ -266,7 +287,8 @@ class DocPilotAgent:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
-            )
+            ),
+            json_schema=PRESERVE_CHANGES_SCHEMA
         )
 
         changes = result.get("changes", [])
@@ -309,7 +331,8 @@ class DocPilotAgent:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
-            )
+            ),
+            json_schema=PRESERVE_CHANGES_SCHEMA
         )
 
         changes = result.get("changes", [])
@@ -352,7 +375,8 @@ class DocPilotAgent:
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
-            )
+            ),
+            json_schema=REBUILD_BLOCKS_SCHEMA
         )
 
         new_blocks = result.get("blocks", [])

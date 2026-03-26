@@ -16,7 +16,7 @@ const API_BASE = window.DOCPILOT_API_BASE || "http://localhost:8000/api/v1";
 
 // ===== State =====
 const state = {
-    mode: "preserve",
+    mode: "auto",
     provider: "auto",
     isProcessing: false,
 };

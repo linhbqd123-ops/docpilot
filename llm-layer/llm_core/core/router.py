@@ -47,6 +47,32 @@ class LLMRouter:
         for client in self._clients.values():
             await client.close()
 
+    def _validate_json_schema(self, data: dict, schema: dict) -> None:
+        """Basic JSON schema validation for required fields and types."""
+        # Check required fields
+        required = schema.get("required", [])
+        for field in required:
+            if field not in data:
+                raise ValueError(f"Missing required field: {field}")
+
+        # Check field types (basic validation)
+        properties = schema.get("properties", {})
+        for field, field_schema in properties.items():
+            if field in data:
+                expected_type = field_schema.get("type")
+                if expected_type:
+                    actual_value = data[field]
+                    if expected_type == "string" and not isinstance(actual_value, str):
+                        raise ValueError(f"Field {field} should be string, got {type(actual_value)}")
+                    elif expected_type == "number" and not isinstance(actual_value, (int, float)):
+                        raise ValueError(f"Field {field} should be number, got {type(actual_value)}")
+                    elif expected_type == "boolean" and not isinstance(actual_value, bool):
+                        raise ValueError(f"Field {field} should be boolean, got {type(actual_value)}")
+                    elif expected_type == "array" and not isinstance(actual_value, list):
+                        raise ValueError(f"Field {field} should be array, got {type(actual_value)}")
+                    elif expected_type == "object" and not isinstance(actual_value, dict):
+                        raise ValueError(f"Field {field} should be object, got {type(actual_value)}")
+
     def _select_provider(self, request: LLMRequest) -> list[ProviderConfig]:
         """Select providers to try, in order of preference."""
         providers = list(self.config.providers)
@@ -103,13 +129,18 @@ class LLMRouter:
             f"All providers failed. Last error: {last_error}"
         )
 
-    async def complete_json(self, request: LLMRequest) -> dict:
+    async def complete_json(self, request: LLMRequest, json_schema: Optional[dict] = None) -> dict:
         """Send a completion request and enforce valid JSON response.
+
+        Args:
+            request: The LLM request
+            json_schema: Optional JSON schema for structured outputs (if provider supports it)
 
         Retries with stricter prompting if the response is not valid JSON.
         """
-        # Add JSON mode flag
+        # Set JSON mode and schema
         request.json_mode = True
+        request.json_schema = json_schema
 
         for attempt in range(self.config.json_retry_attempts + 1):
             response = await self.complete(request)
@@ -124,10 +155,13 @@ class LLMRouter:
 
             try:
                 parsed = json.loads(content)
+                # Validate against schema if provided
+                if json_schema:
+                    self._validate_json_schema(parsed, json_schema)
                 return parsed
-            except json.JSONDecodeError as e:
+            except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(
-                    f"JSON parse failed (attempt {attempt + 1}): {e}"
+                    f"JSON validation failed (attempt {attempt + 1}): {e}"
                 )
                 if attempt < self.config.json_retry_attempts:
                     # Strengthen the system prompt for retry

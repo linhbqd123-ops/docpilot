@@ -4,7 +4,7 @@
     "description": "DocPilot Word Add-in Frontend",
     "scripts": {
         "start": "npx office-addin-debugging start manifest.xml",
-        "dev": "npx http-server . -p 3000 -S -C certs/localhost.crt -K certs/localhost.key --cors",
+        "dev": "npx office-addin-dev-certs install && powershell -Command \"mkdir .office-addin-dev-certs -ErrorAction SilentlyContinue; Copy-Item \\\"$env:USERPROFILE\\.office-addin-dev-certs\\*\\\" .office-addin-dev-certs\" && npx http-server . -p 3000 -S -C .office-addin-dev-certs/localhost.crt -K .office-addin-dev-certs/localhost.key --cors",
         "dev-http": "npx http-server . -p 3000 --cors",
         "stop": "npx office-addin-debugging stop manifest.xml",
         "sideload": "npx office-addin-dev-certs install && npx office-toolbox sideload -m manifest.xml -a word"

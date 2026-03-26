@@ -14,12 +14,14 @@ from fastapi.middleware.cors import CORSMiddleware
 # Add llm-layer to Python path so we can import llm_core
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "llm-layer"))
 
-from app.api.routes import router
-from app.agent.agent import DocPilotAgent
-from app.tools.document_tools import DocMCPClient
-from app.core.config import settings
-from app.persistence.database import db_service
-from app.persistence.event_bus import event_bus
+# Use relative imports for local agent-backend modules to avoid colliding
+# with the top-level `app` package in doc-mcp-service.
+from .api.routes import router
+from .agent.agent import DocPilotAgent
+from .tools.document_tools import DocMCPClient
+from .core.config import settings
+from .persistence.database import db_service
+from .persistence.event_bus import event_bus
 
 from llm_core.core.config import load_llm_config
 from llm_core.core.router import LLMRouter

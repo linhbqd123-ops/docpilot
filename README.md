@@ -142,35 +142,110 @@ docpilot/
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **Node.js 18+** (for frontend dev server)
-- **Microsoft Word** (desktop version for add-in sideloading)
-- **An LLM provider** — one of:
-  - [Ollama](https://ollama.com/) (local, free) — **recommended for getting started**
-  - Groq API key (cloud, fast)
-  - OpenRouter API key (cloud, many models)
-  - OpenAI API key (cloud)
+DocPilot requires the following software to be installed on your machine:
 
-### Option A: Docker (Recommended)
+#### Required Software
+
+- **Python 3.11+** (for backend services)
+  - Download from: https://www.python.org/downloads/
+  - Or use package managers:
+    - Windows (Chocolatey): `choco install python`
+    - Windows (winget): `winget install Python.Python.3.11`
+    - macOS (Homebrew): `brew install python@3.11`
+    - Ubuntu/Debian: `sudo apt update && sudo apt install python3.11 python3.11-venv`
+
+- **Node.js 18+** (for frontend development)
+  - Download from: https://nodejs.org/
+  - Or use package managers:
+    - Windows (Chocolatey): `choco install nodejs`
+    - Windows (winget): `winget install OpenJS.NodeJS`
+    - macOS (Homebrew): `brew install node`
+    - Ubuntu/Debian: `curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - && sudo apt-get install -y nodejs`
+
+- **Microsoft Word** (desktop version for add-in testing)
+  - Office 365 subscription or standalone Office installation
+  - Must be the desktop app (not web version)
+
+- **An LLM provider** (for AI functionality)
+  - [Ollama](https://ollama.com/) (local, free, recommended for getting started)
+  - Or cloud providers: Groq, OpenRouter, OpenAI, etc.
+
+#### Optional but Recommended
+
+- **Git** (for cloning the repository)
+  - Windows: https://git-scm.com/download/win
+  - macOS: `brew install git`
+  - Ubuntu: `sudo apt install git`
+
+- **Docker** (for containerized deployment)
+  - Windows/macOS: https://docs.docker.com/get-docker/
+  - Ubuntu: `sudo apt install docker.io docker-compose`
+
+#### Verification
+
+After installation, verify everything works:
 
 ```bash
-# 1. Clone and configure
-cp .env.example .env
-# Edit .env with your API keys (optional for local-only setup)
+# Python
+python --version  # Should show 3.11+
+pip --version     # Should work
 
-# 2. Start services
-docker compose up --build
+# Node.js
+node --version    # Should show 18+
+npm --version     # Should work
 
-# 3. Verify
-# DOC-MCP: http://localhost:8001/docs
-# Agent:   http://localhost:8000/docs
+# Git (if installed)
+git --version
+
+# Docker (if installed)
+docker --version
+docker compose version
 ```
 
-### Option B: Local Development
+#### First Time Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone <repository-url>
+   cd docpilot
+   ```
+
+2. **Configure environment (optional for local LLM):**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys if using cloud LLM providers
+   ```
+
+3. **Set up Ollama (recommended for local AI):**
+   ```bash
+   # Install Ollama from https://ollama.com/
+   ollama pull qwen2.5  # Pull a model
+   ```
+
+### Option A: Docker (Backend Services Only)
+
+Docker runs the backend services (DOC-MCP and Agent). Frontend must run locally for Word add-in integration.
+
+```bash
+# 1. Start backend services
+docker compose up --build
+
+# 2. In another terminal, start frontend
+cd frontend
+npm install
+npx office-addin-dev-certs install
+npm run dev
+
+# 3. Verify
+# Backend services: http://localhost:8000/docs, http://localhost:8001/docs
+# Frontend: https://localhost:3000/src/taskpane.html
+```
+
+### Option B: Local Development (Recommended)
 
 **Windows:**
 ```batch
-# 1. Configure
+# 1. Configure (optional)
 copy .env.example .env
 
 # 2. Start all services
@@ -179,7 +254,7 @@ start-dev.bat
 
 **Linux/macOS:**
 ```bash
-# 1. Configure
+# 1. Configure (optional)
 cp .env.example .env
 
 # 2. Make script executable and run
@@ -206,8 +281,15 @@ uvicorn app.main:app --port 8000 --reload
 
 # Terminal 3: Frontend
 cd frontend
-npx http-server . -p 3000 --cors
+npm install
+npx office-addin-dev-certs install
+npx http-server . -p 3000 -S -C .office-addin-dev-certs/localhost.crt -K .office-addin-dev-certs/localhost.key --cors
 ```
+
+**Verify services are running:**
+- DOC-MCP Service: http://localhost:8001/docs
+- Agent Backend: http://localhost:8000/docs
+- Frontend: https://localhost:3000/src/taskpane.html
 
 ### Setting Up the Word Add-in
 
@@ -215,7 +297,7 @@ npx http-server . -p 3000 --cors
 2. Go to **Insert** → **Add-ins** → **My Add-ins** → **Shared Folder** (or use sideloading)
 3. For development, use the [Office Add-in Sideloading guide](https://learn.microsoft.com/en-us/office/dev/add-ins/testing/sideload-office-add-ins-for-testing):
    - Place `frontend/manifest.xml` in a shared folder
-   - Or use: `cd frontend && npx office-addin-dev-certs install && npm run start`
+   - Or use: `cd frontend && npm run start`
 4. The DocPilot panel appears in the **Home** tab
 
 ### Setting Up Ollama (Local LLM)
@@ -287,13 +369,12 @@ LLM_PROVIDER_OPENAI_API_KEY=sk-...
 
 #### `POST /api/v1/agent/run`
 
-Execute the AI agent on a document.
+Execute the AI agent on a document. **Auto mode**: The agent automatically determines the best approach.
 
 ```json
 {
     "message": "Rewrite this document in a more professional tone",
     "document_base64": "UEsDBBQ...",
-    "mode": "preserve",
     "action": "rewrite",
     "provider_name": "local"
 }
@@ -304,8 +385,7 @@ Execute the AI agent on a document.
 |-------|------|-------------|
 | `message` | string | User instruction |
 | `document_base64` | string? | Base64-encoded .docx file |
-| `mode` | string? | `preserve` or `rebuild` |
-| `action` | string? | `rewrite`, `improve`, `tailor_cv`, `generate` |
+| `action` | string? | `rewrite`, `improve`, `tailor_cv`, `generate` (auto-detects if omitted) |
 | `provider_name` | string? | Specific LLM provider to use |
 
 **Response:**
@@ -341,21 +421,32 @@ Full API documentation available at `/docs` (Swagger UI) on each service.
 
 ---
 
-## Agent Modes
+## Intelligent Mode Selection (Auto)
 
-### Preserve Mode
-Rewrites text while keeping the original document structure and formatting intact:
+DocPilot automatically determines the best approach for each request:
+
+### Preserve Mode (Block-level edits)
+**Used when:** User wants to modify specific content while keeping structure
+- Examples: "improve grammar", "make more professional", "tailor for job description"
+- Behavior: Updates specific text blocks while preserving formatting, styles, and structure
 - Heading styles are preserved
 - List formatting is maintained  
 - Table structure remains unchanged
-- Only text content is modified
 
-### Rebuild Mode
-Generates a completely new document:
+### Rebuild Mode (Full regeneration)
+**Used when:** User wants to generate new content or restructure document
+- Examples: "generate a new CV", "rebuild the document from scratch"
+- Behavior: Generates completely new document with automatic structuring
 - Creates proper heading hierarchy
 - Structures content with appropriate styles
 - Supports tables and lists
-- Replaces entire document content
+
+### How it works:
+1. **If you specify action**: Message → Rewrite, Improve, Tailor CV → PRESERVE | Generate, Rebuild → REBUILD
+2. **If you don't specify action**: Agent uses LLM to classify your intent automatically
+3. **Always follows your prompt**: The mode is just implementation detail - your user message is always followed
+
+**No need to choose manually** - the agent handles it intelligently! ✨
 
 ---
 
@@ -399,8 +490,46 @@ All prompts are in `agent-backend/app/prompts/templates.py`. Each prompt:
 | Backend not connecting | Check that both services are running (`/health` endpoints) |
 | LLM timeout | Increase `timeout` in provider config. For Ollama, ensure model is loaded |
 | Invalid JSON from LLM | System auto-retries. If persistent, try a larger model |
-| Add-in not loading | Check manifest.xml URLs match your dev server. Ensure HTTPS for production |
+| Add-in not loading | Check manifest.xml URLs match your dev server. Office add-ins require HTTPS. Use `npx office-addin-dev-certs install` for development. |
 | Document not updating | Verify the add-in has ReadWriteDocument permissions |
+| Certificate errors in browser | Run `npx office-addin-dev-certs install` to trust the development certificate |
+| Python virtualenv issues | Delete `.venv` folder and rerun the start script to recreate it |
+| Node.js/npm issues | Clear npm cache: `npm cache clean --force` and reinstall: `rm -rf node_modules && npm install` |
+| Permission errors | On Windows, run terminal as Administrator. On Linux/Mac, check file permissions |
+| Port already in use | Kill processes using ports 8000, 8001, 3000: `npx kill-port 8000 8001 3000` |
+| Ollama model not found | Run `ollama pull qwen2.5` to download the model |
+| **SSL: CERTIFICATE_VERIFY_FAILED** (cloud LLM providers fail) | This happens in development environments with SSL verification issues. Set environment variable: `set LLM_VERIFY_SSL=false` (Windows) or `export LLM_VERIFY_SSL=false` (Linux/Mac). This disables SSL verification for external API calls (development only). |
+
+### Common Setup Issues
+
+**SSL Certificate Verification (Development):**
+- DocPilot's LLM client verifies SSL certificates by default (secure for production)
+- In some development environments, especially on Windows, you may see "SSL: CERTIFICATE_VERIFY_FAILED" when using cloud LLM providers (OpenRouter, Groq, OpenAI)
+- **Fix for Development**: Disable SSL verification temporarily:
+  ```bash
+  # Windows
+  set LLM_VERIFY_SSL=false
+  npm run dev  # or start-dev.bat
+  
+  # Linux/Mac
+  export LLM_VERIFY_SSL=false
+  npm run dev  # or ./start-dev.sh
+  ```
+- **Production**: Always keep SSL verification enabled (default behavior)
+
+**On Windows:**
+- If `python` command not found, use `py` or install Python properly
+- For certificate trust issues, run PowerShell as Administrator when installing certs
+- For SSL errors with cloud LLMs, use the `LLM_VERIFY_SSL=false` environment variable above
+
+**On macOS/Linux:**
+- If permission denied on ports < 1024, use ports > 1024 or run with sudo (not recommended)
+- For certificate trust, the `office-addin-dev-certs` should handle it automatically
+
+**For Docker:**
+- Ensure Docker Desktop is running
+- On Windows, enable file sharing for the project directory
+- Clear Docker cache if build fails: `docker system prune -a`
 
 ---
 

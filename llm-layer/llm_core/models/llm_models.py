@@ -26,6 +26,7 @@ class ProviderConfig(BaseModel):
     temperature: float = 0.3
     timeout: int = 120
     is_fallback: bool = False
+    supports_json_schema: bool = False  # Whether provider supports JSON schema structured outputs
 
 
 class LLMRequest(BaseModel):
@@ -35,6 +36,7 @@ class LLMRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     json_mode: bool = False
+    json_schema: Optional[dict] = None  # JSON schema for structured outputs
     provider_name: Optional[str] = None  # None = auto-select
 
 

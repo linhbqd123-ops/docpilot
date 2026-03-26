@@ -3,6 +3,75 @@
 Each prompt enforces JSON output and is designed to be deterministic.
 """
 
+# JSON Schemas for structured outputs
+CLASSIFY_INTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["rewrite", "improve", "tailor_cv", "generate", "chat"]},
+        "mode": {"type": "string", "enum": ["preserve", "rebuild"]},
+        "scope": {"type": "string", "enum": ["full", "selection"]},
+        "description": {"type": "string"}
+    },
+    "required": ["intent", "mode", "scope", "description"]
+}
+
+PRESERVE_CHANGES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "block_id": {"type": "string"},
+                    "new_text": {"type": "string"}
+                },
+                "required": ["block_id", "new_text"]
+            }
+        },
+        "summary": {"type": "string"}
+    },
+    "required": ["changes", "summary"]
+}
+
+REBUILD_BLOCKS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "blocks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["paragraph", "list_item", "table"]},
+                    "style": {"type": ["string", "null"]},
+                    "text": {"type": "string"},
+                    "level": {"type": ["integer", "null"]},
+                    "rows": {  # For table type
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cells": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {"text": {"type": "string"}},
+                                        "required": ["text"]
+                                    }
+                                }
+                            },
+                            "required": ["cells"]
+                        }
+                    }
+                },
+                "required": ["type", "text"]
+            }
+        },
+        "summary": {"type": "string"}
+    },
+    "required": ["blocks", "summary"]
+}
+
 SYSTEM_PROMPT = """You are DocPilot, an AI assistant specialized in editing and improving Microsoft Word documents.
 You operate by analyzing document structure and making precise, block-level changes.
 

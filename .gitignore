@@ -16,6 +16,7 @@ uploads/
 *.doc
 !tests/fixtures/*.docx
 certs/
+.office-addin-dev-certs/
 .idea/
 .vscode/
 *.swp

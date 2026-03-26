@@ -20,7 +20,8 @@
             "max_tokens": 4096,
             "temperature": 0.3,
             "timeout": 60,
-            "is_fallback": true
+            "is_fallback": true,
+            "supports_json_schema": true
         },
         {
             "name": "openrouter",

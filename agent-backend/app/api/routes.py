@@ -17,7 +17,7 @@ class AgentRequest(BaseModel):
     """Request to the DocPilot agent."""
     message: str
     document_base64: Optional[str] = None
-    mode: Optional[str] = None  # preserve | rebuild
+    mode: Optional[str] = None  # auto | preserve | rebuild
     action: Optional[str] = None  # rewrite | improve | tailor_cv | generate
     provider_name: Optional[str] = None  # LLM provider to use
 
@@ -38,7 +38,7 @@ async def run_agent(request: AgentRequest, req: Request):
     if agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
-    logger.info("Agent run: action=%s mode=%s", request.action, request.mode)
+    logger.info("Agent run: action=%s", request.action)
     result = await agent.run(
         user_message=request.message,
         document_base64=request.document_base64,
