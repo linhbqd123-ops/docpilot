@@ -63,3 +63,24 @@ class TestLoadLLMConfig:
         monkeypatch.setenv("LLM_PROVIDER_OPENAI_API_KEY", "from-env")
         config = load_llm_config(path)
         assert config.providers[0].api_key == "from-env"
+
+    def test_legacy_ssl_fields_are_ignored(self, tmp_path):
+        """Legacy SSL config keys should not break loading existing config files."""
+        cfg = {
+            "providers": [
+                {
+                    "name": "groq",
+                    "base_url": "https://api.groq.com/openai/v1",
+                    "model": "llama-3.3-70b-versatile",
+                    "verify_ssl": False,
+                    "ca_bundle_path": "C:/certs/corp-ca.pem",
+                }
+            ],
+        }
+        path = tmp_path / "config.json"
+        path.write_text(json.dumps(cfg))
+
+        config = load_llm_config(path)
+        provider = config.providers[0]
+        assert provider.name == "groq"
+        assert provider.base_url == "https://api.groq.com/openai/v1"

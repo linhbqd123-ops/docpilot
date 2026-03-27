@@ -24,6 +24,15 @@ from llm_core.providers.openai_client import LLMClient, LLMClientError
 
 logger = logging.getLogger(__name__)
 
+
+def _short_text(text: Optional[str], limit: int = 2000) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "...(truncated)"
+
 JSON_ENFORCEMENT_SUFFIX = (
     "\n\nIMPORTANT: You MUST respond with valid JSON only. "
     "No markdown, no code fences, no explanation outside the JSON object. "
@@ -104,9 +113,21 @@ class LLMRouter:
 
         last_error: Optional[Exception] = None
 
+        logger.info(f"Selected providers in order: {[p.name for p in providers]}")
+        logger.debug(
+            "LLM complete request provider_name=%s temp=%s max_tokens=%s json_mode=%s messages=%s system_prompt=%s",
+            request.provider_name,
+            request.temperature,
+            request.max_tokens,
+            request.json_mode,
+            _short_text(json.dumps(request.messages, ensure_ascii=False), 1500),
+            _short_text(request.system_prompt, 1500),
+        )
         for provider in providers:
             client = self._clients.get(provider.name)
+            logger.info(f"Attempting provider {provider.name} for request")
             if not client:
+                logger.warning(f"No client found for provider {provider.name}")
                 continue
 
             for attempt in range(self.config.max_retries):
@@ -115,6 +136,14 @@ class LLMRouter:
                         f"Trying provider {provider.name} (attempt {attempt + 1})"
                     )
                     response = await client.chat_completion(request)
+                    logger.info(f"Successfully got response from {provider.name}")
+                    logger.debug(
+                        "Provider response provider=%s model=%s usage=%s content=%s",
+                        response.provider_used,
+                        response.model_used,
+                        response.usage,
+                        _short_text(response.content, 2000),
+                    )
                     return response
                 except LLMClientError as e:
                     last_error = e
@@ -123,7 +152,7 @@ class LLMRouter:
                     )
                     continue
 
-            logger.warning(f"All retries exhausted for provider {provider.name}")
+            logger.error(f"All retries exhausted for provider {provider.name}")
 
         raise LLMClientError(
             f"All providers failed. Last error: {last_error}"
@@ -138,11 +167,30 @@ class LLMRouter:
 
         Retries with stricter prompting if the response is not valid JSON.
         """
-        # Set JSON mode and schema
+        # Set JSON mode
         request.json_mode = True
-        request.json_schema = json_schema
+        
+        # Only use json_schema if the selected provider supports it
+        selected_providers = self._select_provider(request)
+        if selected_providers and json_schema:
+            primary_provider = selected_providers[0]
+            if not primary_provider.supports_json_schema:
+                logger.debug(
+                    f"Provider {primary_provider.name} does not support json_schema, "
+                    f"will use json_object mode instead"
+                )
+                request.json_schema = None
+            else:
+                request.json_schema = json_schema
+        else:
+            request.json_schema = json_schema
 
         for attempt in range(self.config.json_retry_attempts + 1):
+            logger.debug(
+                "JSON completion attempt=%d schema=%s",
+                attempt + 1,
+                json_schema.get("name") if json_schema else None,
+            )
             response = await self.complete(request)
             content = response.content.strip()
 
@@ -170,10 +218,21 @@ class LLMRouter:
                     else:
                         request.system_prompt = JSON_ENFORCEMENT_SUFFIX.strip()
                     # Add a user message clarifying
-                    request.messages.append({
-                        "role": "user",
-                        "content": "Your previous response was not valid JSON. Please respond with ONLY a valid JSON object.",
-                    })
+                    refine_message = (
+                        "Your previous response was not valid JSON. "
+                        "Please respond with ONLY a valid JSON object."
+                    )
+                    request.messages.append(
+                        {
+                            "role": "user",
+                            "content": refine_message,
+                        }
+                    )
+                    logger.debug(
+                        "Applied prompt refine for retry. refined_system_prompt=%s refine_message=%s",
+                        _short_text(request.system_prompt, 2000),
+                        refine_message,
+                    )
 
         raise LLMClientError(
             f"Failed to get valid JSON after {self.config.json_retry_attempts + 1} attempts"

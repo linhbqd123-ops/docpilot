@@ -23,6 +23,7 @@ from app.prompts.templates import (
     PRESERVE_REWRITE_PROMPT,
     REBUILD_BLOCKS_SCHEMA,
     REBUILD_GENERATION_PROMPT,
+    GENERATE_CV_PROMPT,
     IMPROVE_PROMPT,
     TAILOR_CV_PROMPT,
 )
@@ -32,6 +33,15 @@ from llm_core.models.llm_models import LLMRequest
 from llm_core.core.router import LLMRouter
 
 logger = logging.getLogger(__name__)
+
+
+def _short_text(text: Optional[str], limit: int = 1600) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "...(truncated)"
 
 
 class AgentMode(str, Enum):
@@ -104,21 +114,30 @@ class DocPilotAgent:
         4. Return result with updated document
         """
         try:
+            logger.info(
+                "Agent flow start action=%s mode=%s provider=%s user_message=%s",
+                action,
+                mode,
+                provider_name,
+                _short_text(user_message, 500),
+            )
             # Step 1: Extract document structure
             structure = await self.mcp_client.extract_structure(
                 document_base64=document_base64
             )
             blocks = structure.get("blocks", [])
             blocks_json = json.dumps(blocks, ensure_ascii=False, indent=2)
+            logger.debug("Extracted structure blocks=%d", len(blocks))
 
             # Step 2: Determine intent and mode
             intent, detected_mode = await self._classify_intent(
                 user_message, blocks, action, mode
             )
 
-            logger.info(f"Agent intent: {intent}, mode: {detected_mode}")
+            logger.info("Agent intent=%s mode=%s", intent, detected_mode)
 
             # Step 3: Execute based on intent
+            logger.info("Starting agent execution")
             if intent == AgentIntent.CHAT:
                 return await self._handle_chat(user_message, blocks_json, provider_name)
 
@@ -186,6 +205,8 @@ class DocPilotAgent:
             document_summary=doc_summary,
         )
 
+        logger.info("Classifying user intent with LLM")
+        logger.debug("Intent prompt=%s", _short_text(prompt))
         try:
             result = await self.llm_router.complete_json(
                 LLMRequest(
@@ -197,6 +218,7 @@ class DocPilotAgent:
 
             intent = AgentIntent(result.get("intent", "rewrite"))
             detected_mode = AgentMode(result.get("mode", "preserve"))
+            logger.debug("Intent classify response=%s", _short_text(json.dumps(result, ensure_ascii=False)))
             # Override mode if user specified
             mode = user_mode or detected_mode
             return intent, mode
@@ -208,6 +230,8 @@ class DocPilotAgent:
         self, user_message: str, blocks_json: str, provider_name: Optional[str]
     ) -> AgentResult:
         """Handle a simple chat message (no document changes)."""
+        logger.info("Handling chat request with LLM")
+        logger.debug("Chat user_message=%s", _short_text(user_message))
         response = await self.llm_router.complete(
             LLMRequest(
                 messages=[{"role": "user", "content": user_message}],
@@ -228,10 +252,12 @@ class DocPilotAgent:
         provider_name: Optional[str],
     ) -> AgentResult:
         """Handle a PRESERVE mode rewrite."""
+        logger.info("Handling rewrite request with LLM")
         prompt = PRESERVE_REWRITE_PROMPT.format(
             blocks_json=blocks_json,
             user_instruction=user_message,
         )
+        logger.debug("Rewrite prompt=%s", _short_text(prompt))
 
         result = await self.llm_router.complete_json(
             LLMRequest(
@@ -244,6 +270,11 @@ class DocPilotAgent:
 
         changes = result.get("changes", [])
         summary = result.get("summary", "Changes applied")
+        logger.debug(
+            "Rewrite response summary=%s changes_count=%d",
+            _short_text(summary, 300),
+            len(changes),
+        )
 
         if not changes:
             return AgentResult(
@@ -255,7 +286,12 @@ class DocPilotAgent:
         # Apply changes via DOC-MCP
         apply_result = await self.mcp_client.apply_changes(
             changes=[
-                {"block_id": c["block_id"], "new_text": c["new_text"], "action": "update"}
+                {
+                    "block_id": c["block_id"],
+                    "new_text": c["new_text"],
+                    "new_style": c.get("new_style"),
+                    "action": "update",
+                }
                 for c in changes
             ],
             document_base64=document_base64,
@@ -277,10 +313,12 @@ class DocPilotAgent:
         provider_name: Optional[str],
     ) -> AgentResult:
         """Handle document improvement."""
+        logger.info("Handling improve request with LLM")
         prompt = IMPROVE_PROMPT.format(
             blocks_json=blocks_json,
             user_instruction=user_message,
         )
+        logger.debug("Improve prompt=%s", _short_text(prompt))
 
         result = await self.llm_router.complete_json(
             LLMRequest(
@@ -293,13 +331,23 @@ class DocPilotAgent:
 
         changes = result.get("changes", [])
         summary = result.get("summary", "Improvements applied")
+        logger.debug(
+            "Improve response summary=%s changes_count=%d",
+            _short_text(summary, 300),
+            len(changes),
+        )
 
         if not changes:
             return AgentResult(success=True, message="No improvements needed.", document_base64=document_base64)
 
         apply_result = await self.mcp_client.apply_changes(
             changes=[
-                {"block_id": c["block_id"], "new_text": c["new_text"], "action": "update"}
+                {
+                    "block_id": c["block_id"],
+                    "new_text": c["new_text"],
+                    "new_style": c.get("new_style"),
+                    "action": "update",
+                }
                 for c in changes
             ],
             document_base64=document_base64,
@@ -321,29 +369,42 @@ class DocPilotAgent:
         provider_name: Optional[str],
     ) -> AgentResult:
         """Handle CV tailoring."""
+        logger.info("Handling CV tailoring request with LLM")
         prompt = TAILOR_CV_PROMPT.format(
             blocks_json=blocks_json,
             user_instruction=user_message,
         )
+        logger.debug("Tailor CV prompt=%s", _short_text(prompt))
 
         result = await self.llm_router.complete_json(
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
+                temperature=0.2,  # Lower temperature for consistent CV formatting
             ),
             json_schema=PRESERVE_CHANGES_SCHEMA
         )
 
         changes = result.get("changes", [])
         summary = result.get("summary", "CV tailored")
+        logger.debug(
+            "Tailor CV response summary=%s changes_count=%d",
+            _short_text(summary, 300),
+            len(changes),
+        )
 
         if not changes:
             return AgentResult(success=True, message="No tailoring changes needed.", document_base64=document_base64)
 
         apply_result = await self.mcp_client.apply_changes(
             changes=[
-                {"block_id": c["block_id"], "new_text": c["new_text"], "action": "update"}
+                {
+                    "block_id": c["block_id"],
+                    "new_text": c["new_text"],
+                    "new_style": c.get("new_style"),
+                    "action": "update",
+                }
                 for c in changes
             ],
             document_base64=document_base64,
@@ -365,22 +426,45 @@ class DocPilotAgent:
         provider_name: Optional[str],
     ) -> AgentResult:
         """Handle REBUILD mode - generate new document."""
-        prompt = REBUILD_GENERATION_PROMPT.format(
-            blocks_json=blocks_json,
-            user_instruction=user_message,
-        )
+        logger.info("Handling rebuild request with LLM")
+        
+        # Detect if this is a CV generation request
+        cv_keywords = ["cv", "resume", "curriculum", "vitae", "job", "position", "experience", "skills", "profile"]
+        is_cv_request = any(keyword in user_message.lower() for keyword in cv_keywords)
+        
+        # Use CV-specific prompt for CV generation requests
+        if is_cv_request:
+            logger.info("Detected CV generation request, using specialized CV prompt")
+            prompt = GENERATE_CV_PROMPT.format(
+                blocks_json=blocks_json,
+                user_instruction=user_message,
+            )
+        else:
+            prompt = REBUILD_GENERATION_PROMPT.format(
+                blocks_json=blocks_json,
+                user_instruction=user_message,
+            )
+        logger.debug("Rebuild prompt=%s", _short_text(prompt))
 
+        # Lower temperature for CV generation to ensure consistent formatting
+        # Use provider_name from request, but we'll handle temp at LLMRequest level
         result = await self.llm_router.complete_json(
             LLMRequest(
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=SYSTEM_PROMPT,
                 provider_name=provider_name,
+                temperature=0.2 if is_cv_request else 0.3,  # Lower temp for CV to reduce hallucination
             ),
             json_schema=REBUILD_BLOCKS_SCHEMA
         )
 
         new_blocks = result.get("blocks", [])
         summary = result.get("summary", "Document generated")
+        logger.debug(
+            "Rebuild response summary=%s blocks_count=%d",
+            _short_text(summary, 300),
+            len(new_blocks),
+        )
 
         if not new_blocks:
             return AgentResult(success=False, message="Failed to generate document content.")

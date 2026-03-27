@@ -69,6 +69,7 @@ class BlockChange(BaseModel):
     block_id: str
     new_text: Optional[str] = None
     new_runs: Optional[list[TextRun]] = None
+    new_style: Optional[str] = None
     action: str = "update"  # update | delete | insert_after
 
 

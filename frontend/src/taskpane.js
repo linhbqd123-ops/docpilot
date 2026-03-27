@@ -19,6 +19,7 @@ const state = {
     mode: "auto",
     provider: "auto",
     isProcessing: false,
+    traceId: null,
 };
 
 // ===== DOM References =====
@@ -31,7 +32,7 @@ const dom = {
     userInput: null,
     sendBtn: null,
     connectionStatus: null,
-    modeToggle: null,
+    modeSelect: null,
     modelSelect: null,
 };
 
@@ -43,13 +44,17 @@ Office.onReady((info) => {
 });
 
 function initializeApp() {
+    state.traceId = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID().slice(0, 8)
+        : String(Date.now());
+
     // Cache DOM references
     dom.chatContainer = $("#chatContainer");
     dom.welcomeMessage = $("#welcomeMessage");
     dom.userInput = $("#userInput");
     dom.sendBtn = $("#sendBtn");
     dom.connectionStatus = $("#connectionStatus");
-    dom.modeToggle = $("#modeToggle");
+    dom.modeSelect = $("#modeSelect");
     dom.modelSelect = $("#modelSelect");
 
     // Bind events
@@ -67,14 +72,14 @@ function initializeApp() {
         dom.userInput.style.height = Math.min(dom.userInput.scrollHeight, 120) + "px";
     });
 
-    // Mode toggle
-    dom.modeToggle.querySelectorAll(".toggle-btn").forEach((btn) => {
-        btn.addEventListener("click", () => {
-            dom.modeToggle.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
-            btn.classList.add("active");
-            state.mode = btn.dataset.value;
+    // Mode select (mirrors Model select behavior)
+    if (dom.modeSelect) {
+        dom.modeSelect.addEventListener("change", (e) => {
+            state.mode = e.target.value;
         });
-    });
+        // initialize state from select value
+        state.mode = dom.modeSelect.value || state.mode;
+    }
 
     // Model select
     dom.modelSelect.addEventListener("change", (e) => {
@@ -88,6 +93,10 @@ function initializeApp() {
 
     // Check backend connectivity
     checkConnection();
+    logFrontendEvent("app_initialized", "DocPilot taskpane initialized", {
+        apiBase: API_BASE,
+        mode: state.mode,
+    });
 
     // Re-check connection every 30s
     setInterval(checkConnection, 30000);
@@ -102,13 +111,16 @@ async function checkConnection() {
             dot.className = "status-dot connected";
             dom.connectionStatus.title = "Connected to DocPilot backend";
             loadProviders();
+            logFrontendEvent("connection_ok", "Backend health check succeeded", { status: res.status });
         } else {
             dot.className = "status-dot error";
             dom.connectionStatus.title = "Backend returned an error";
+            logFrontendEvent("connection_error", "Backend health check returned error", { status: res.status });
         }
     } catch {
         dot.className = "status-dot error";
         dom.connectionStatus.title = "Cannot connect to backend (http://localhost:8000)";
+        logFrontendEvent("connection_exception", "Backend unreachable", {});
     }
 }
 
@@ -122,7 +134,9 @@ async function loadProviders() {
             data.providers.forEach((p) => {
                 const opt = document.createElement("option");
                 opt.value = p.name;
-                opt.textContent = `${p.name} (${p.model})`;
+                // Keep label short to avoid wide select; show details on hover
+                opt.textContent = p.name;
+                opt.title = `${p.name} (${p.model})`;
                 dom.modelSelect.appendChild(opt);
             });
         }
@@ -284,6 +298,14 @@ async function sendToAgent(message, action = null) {
         provider_name: state.provider === "auto" ? null : state.provider,
     };
 
+    logFrontendEvent("agent_request", "Sending request to backend", {
+        action,
+        mode: state.mode,
+        provider: payload.provider_name,
+        message,
+        hasDocument: !!documentBase64,
+    });
+
     const response = await fetch(`${API_BASE}/agent/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -292,10 +314,20 @@ async function sendToAgent(message, action = null) {
 
     if (!response.ok) {
         const errorText = await response.text();
+        logFrontendEvent("agent_response_error", "Backend returned non-OK response", {
+            status: response.status,
+            errorText,
+        });
         throw new Error(`Backend error: ${response.status} - ${errorText}`);
     }
 
-    return response.json();
+    const data = await response.json();
+    logFrontendEvent("agent_response_ok", "Received successful backend response", {
+        success: data.success,
+        message: data.message,
+        hasUpdatedDocument: !!data.document_base64,
+    });
+    return data;
 }
 
 // ===== Event Handlers =====
@@ -307,6 +339,7 @@ async function handleSend() {
     dom.userInput.style.height = "auto";
 
     addMessage("user", message);
+    logFrontendEvent("user_send", "User submitted free-text instruction", { message });
     setProcessing(true);
     addTypingIndicator();
 
@@ -330,6 +363,7 @@ async function handleSend() {
         }
     } catch (e) {
         removeTypingIndicator();
+        logFrontendEvent("user_send_error", "Error during free-text execution", { error: e.message });
         addMessage("assistant", `Error: ${e.message}`, "error");
     } finally {
         setProcessing(false);
@@ -346,12 +380,25 @@ async function handleAction(action) {
     };
 
     const label = actionLabels[action] || `Running ${action}...`;
-    addMessage("user", `[${action.replace("_", " ").toUpperCase()}] ${label}`);
+    const customInstruction = dom.userInput.value.trim();
+    const actionMessage = customInstruction || label;
+    logFrontendEvent("action_click", "Quick action triggered", {
+        action,
+        actionMessage,
+        usedCustomInstruction: !!customInstruction,
+    });
+
+    if (customInstruction) {
+        dom.userInput.value = "";
+        dom.userInput.style.height = "auto";
+    }
+
+    addMessage("user", `[${action.replace("_", " ").toUpperCase()}] ${actionMessage}`);
     setProcessing(true);
     addTypingIndicator();
 
     try {
-        const result = await sendToAgent(label, action);
+        const result = await sendToAgent(actionMessage, action);
         removeTypingIndicator();
 
         if (result.success) {
@@ -370,8 +417,50 @@ async function handleAction(action) {
         }
     } catch (e) {
         removeTypingIndicator();
+        logFrontendEvent("action_error", "Error during action execution", {
+            action,
+            error: e.message,
+        });
         addMessage("assistant", `Error: ${e.message}`, "error");
     } finally {
         setProcessing(false);
+    }
+}
+
+function sanitizeLogText(value, limit = 2000) {
+    if (value === null || value === undefined) return "";
+    const str = String(value).replace(/\s+/g, " ").trim();
+    return str.length > limit ? `${str.slice(0, limit)}...(truncated)` : str;
+}
+
+async function logFrontendEvent(event, message, payload = {}) {
+    const entry = {
+        traceId: state.traceId,
+        event,
+        message: sanitizeLogText(message, 400),
+        payload,
+        timestamp: new Date().toISOString(),
+    };
+
+    // Keep console output for easy browser debugging.
+    console.log("[DocPilot][frontend]", entry);
+
+    try {
+        await fetch(`${API_BASE}/agent/logs/frontend`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                level: "INFO",
+                event,
+                message: sanitizeLogText(message, 400),
+                payload: {
+                    ...payload,
+                    traceId: state.traceId,
+                    timestamp: entry.timestamp,
+                },
+            }),
+        });
+    } catch {
+        // Avoid throwing from telemetry path.
     }
 }

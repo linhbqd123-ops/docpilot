@@ -27,6 +27,7 @@ class ProviderConfig(BaseModel):
     timeout: int = 120
     is_fallback: bool = False
     supports_json_schema: bool = False  # Whether provider supports JSON schema structured outputs
+    supports_json_strict: bool = False  # Whether provider supports strict mode (constrained decoding)
 
 
 class LLMRequest(BaseModel):

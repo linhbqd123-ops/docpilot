@@ -3,14 +3,63 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from llm_core.core.config import load_llm_config
+from llm_core.core.router import LLMRouter
+
 router = APIRouter(prefix="/api/v1", tags=["agent"])
 
 logger = logging.getLogger(__name__)
+frontend_logger = logging.getLogger("frontend_trace")
+
+
+def _short_text(text: Optional[str], limit: int = 1200) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "...(truncated)"
+
+
+async def _maybe_reload_llm_config(req: Request) -> None:
+    """Reload LLM config if config file changed on disk."""
+    agent = getattr(req.app.state, "agent", None)
+    if agent is None:
+        return
+
+    config_path = getattr(req.app.state, "llm_config_path", None)
+    if not config_path:
+        return
+
+    path = Path(config_path)
+    if not path.exists():
+        return
+
+    current_mtime = path.stat().st_mtime
+    cached_mtime = getattr(req.app.state, "llm_config_mtime", None)
+    if cached_mtime is not None and current_mtime <= cached_mtime:
+        return
+
+    logger.info("Detected change in llm_config.json, reloading LLM router")
+    llm_config = load_llm_config(config_path)
+    new_router = LLMRouter(llm_config)
+
+    old_router = agent.llm_router
+    agent.llm_router = new_router
+    req.app.state.llm_config_mtime = current_mtime
+    await old_router.close()
+
+    logger.info(
+        "LLM config reloaded with providers: %s",
+        [f"{p.name}:{p.model}" for p in llm_config.providers],
+    )
 
 
 class AgentRequest(BaseModel):
@@ -34,11 +83,22 @@ class AgentResponse(BaseModel):
 @router.post("/agent/run", response_model=AgentResponse)
 async def run_agent(request: AgentRequest, req: Request):
     """Execute the DocPilot agent with the given request."""
+    trace_id = str(uuid.uuid4())[:8]
+    await _maybe_reload_llm_config(req)
+
     agent = getattr(req.app.state, "agent", None)
     if agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
-    logger.info("Agent run: action=%s", request.action)
+    logger.info(
+        "[FLOW:%s] run_agent start action=%s mode=%s provider=%s has_document=%s message=%s",
+        trace_id,
+        request.action,
+        request.mode,
+        request.provider_name,
+        bool(request.document_base64),
+        _short_text(request.message, 400),
+    )
     result = await agent.run(
         user_message=request.message,
         document_base64=request.document_base64,
@@ -47,7 +107,36 @@ async def run_agent(request: AgentRequest, req: Request):
         provider_name=request.provider_name,
     )
 
+    logger.info(
+        "[FLOW:%s] run_agent done success=%s message=%s has_updated_doc=%s",
+        trace_id,
+        result.success,
+        _short_text(result.message, 400),
+        bool(result.document_base64),
+    )
+
     return AgentResponse(**result.to_dict())
+
+
+class FrontendLogRequest(BaseModel):
+    level: str = "INFO"
+    event: str
+    message: str
+    payload: Optional[dict] = None
+
+
+@router.post("/agent/logs/frontend")
+async def ingest_frontend_log(request: FrontendLogRequest):
+    """Ingest frontend trace logs so they are persisted to frontend.log."""
+    payload_preview = request.payload or {}
+    frontend_logger.info(
+        "event=%s level=%s message=%s payload=%s",
+        request.event,
+        request.level,
+        _short_text(request.message, 400),
+        _short_text(str(payload_preview), 1200),
+    )
+    return {"status": "ok"}
 
 
 class ProviderInfo(BaseModel):
@@ -64,6 +153,8 @@ class StatusResponse(BaseModel):
 @router.get("/agent/status", response_model=StatusResponse)
 async def agent_status(req: Request):
     """Get the agent's status and available providers."""
+    await _maybe_reload_llm_config(req)
+
     agent = getattr(req.app.state, "agent", None)
     if agent is None:
         return StatusResponse(status="not_initialized")

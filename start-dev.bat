@@ -27,6 +27,8 @@ start "DOC-MCP Service" cmd /c "cd /d %ROOT%doc-mcp-service && "%ROOT%.venv\Scri
 timeout /t 2 /nobreak >nul
 
 echo [2/3] Starting Agent Backend (port 8000)...
+REM Load environment variables from .env file
+for /f "tokens=*" %%i in ('type "%ROOT%.env" 2^>nul') do set %%i
 start "Agent Backend" cmd /c "cd /d %ROOT%agent-backend && (if defined PYTHONPATH (set PYTHONPATH=%ROOT%llm-layer;%PYTHONPATH%) else (set PYTHONPATH=%ROOT%llm-layer)) && echo Starting uvicorn with auto-reload... && "%ROOT%.venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-include *.py 2>agent_backend_error.log || (echo Agent backend failed to start. Check agent_backend_error.log for details && pause)"
 
 timeout /t 2 /nobreak >nul

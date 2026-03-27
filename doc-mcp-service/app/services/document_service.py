@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import re
 import uuid
 from typing import Optional
@@ -27,6 +28,8 @@ from app.models.document import (
     BlockChange,
     DocumentResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _generate_block_id() -> str:
@@ -157,9 +160,11 @@ class DocumentService:
 
         # Apply changes
         paragraphs_to_delete: list[int] = []
+        logger.debug("DocumentService.apply_changes start changes=%d", len(changes))
 
         for change in changes:
             if change.block_id not in id_to_index:
+                logger.debug("Skipping unknown block_id=%s", change.block_id)
                 continue
 
             block = structure.blocks[id_to_index[change.block_id]]
@@ -173,6 +178,7 @@ class DocumentService:
 
                 if change.action == "delete":
                     paragraphs_to_delete.append(doc_idx)
+                    logger.debug("Marked paragraph index=%d for deletion", doc_idx)
                     continue
 
                 if change.action == "update" and change.new_text is not None:
@@ -200,6 +206,28 @@ class DocumentService:
                         else:
                             para.add_run(change.new_text)
 
+                    if change.new_style:
+                        try:
+                            para.style = change.new_style
+                            logger.debug(
+                                "Applied new_style=%s to block_id=%s",
+                                change.new_style,
+                                change.block_id,
+                            )
+                        except KeyError:
+                            logger.warning(
+                                "Requested style not found: %s for block_id=%s",
+                                change.new_style,
+                                change.block_id,
+                            )
+
+                if change.action == "update" and change.new_style:
+                    try:
+                        para.style = change.new_style
+                    except KeyError:
+                        # Ignore invalid style names to keep apply_changes resilient.
+                        pass
+
         # Delete marked paragraphs (reverse order to preserve indices)
         for idx in sorted(paragraphs_to_delete, reverse=True):
             if idx < len(doc.paragraphs):
@@ -208,6 +236,7 @@ class DocumentService:
 
         new_base64 = _doc_to_base64(doc)
         new_structure = self.extract_structure(new_base64, include_formatting=True)
+        logger.debug("DocumentService.apply_changes done resulting_blocks=%d", len(new_structure.blocks))
 
         return DocumentResponse(
             structure=new_structure,
@@ -249,6 +278,7 @@ class DocumentService:
     ) -> DocumentResponse:
         """Insert structured blocks into a document."""
         doc = _doc_from_base64(document_base64)
+        logger.debug("DocumentService.insert_structured_content start blocks=%d position=%s", len(blocks), position)
 
         for block in blocks:
             if block.type == BlockType.TABLE:
@@ -258,6 +288,7 @@ class DocumentService:
 
         new_base64 = _doc_to_base64(doc)
         new_structure = self.extract_structure(new_base64, include_formatting=True)
+        logger.debug("DocumentService.insert_structured_content done resulting_blocks=%d", len(new_structure.blocks))
 
         return DocumentResponse(
             structure=new_structure,
@@ -378,7 +409,20 @@ class DocumentService:
             return
 
         table = doc.add_table(rows=num_rows, cols=num_cols)
-        table.style = "Table Grid"
+        
+        # Try to apply Table Grid style, fall back to no style if not available
+        try:
+            table.style = "Table Grid"
+            logger.debug("Applied table style Table Grid")
+        except KeyError:
+            # Table Grid style not available, use default table style
+            try:
+                table.style = "Table Normal"
+                logger.debug("Applied fallback table style Table Normal")
+            except KeyError:
+                # No common table styles available, proceed without style
+                logger.warning("No supported table style available (Table Grid/Table Normal). Using default style.")
+                pass
 
         for r_idx, row in enumerate(block.rows):
             for c_idx, cell in enumerate(row.cells):

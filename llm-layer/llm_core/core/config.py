@@ -45,9 +45,11 @@ def load_llm_config(config_path: str | Path | None = None) -> LLMConfig:
 
     # Override API keys from environment
     for provider in config.providers:
-        env_key = f"LLM_PROVIDER_{provider.name.upper()}_API_KEY"
-        env_val = os.environ.get(env_key)
-        if env_val:
-            provider.api_key = env_val
+        provider_name = provider.name.upper()
+
+        api_key_env = f"LLM_PROVIDER_{provider_name}_API_KEY"
+        api_key_val = os.environ.get(api_key_env)
+        if api_key_val:
+            provider.api_key = api_key_val
 
     return config

@@ -498,29 +498,18 @@ All prompts are in `agent-backend/app/prompts/templates.py`. Each prompt:
 | Permission errors | On Windows, run terminal as Administrator. On Linux/Mac, check file permissions |
 | Port already in use | Kill processes using ports 8000, 8001, 3000: `npx kill-port 8000 8001 3000` |
 | Ollama model not found | Run `ollama pull qwen2.5` to download the model |
-| **SSL: CERTIFICATE_VERIFY_FAILED** (cloud LLM providers fail) | This happens in development environments with SSL verification issues. Set environment variable: `set LLM_VERIFY_SSL=false` (Windows) or `export LLM_VERIFY_SSL=false` (Linux/Mac). This disables SSL verification for external API calls (development only). |
+| **SSL: CERTIFICATE_VERIFY_FAILED** (cloud LLM providers fail) | DocPilot now uses the operating system trust store for HTTPS providers. If this still happens, install your corporate/intercepting CA certificate into the OS trust store used by Windows/macOS/Linux. |
 
 ### Common Setup Issues
 
-**SSL Certificate Verification (Development):**
-- DocPilot's LLM client verifies SSL certificates by default (secure for production)
-- In some development environments, especially on Windows, you may see "SSL: CERTIFICATE_VERIFY_FAILED" when using cloud LLM providers (OpenRouter, Groq, OpenAI)
-- **Fix for Development**: Disable SSL verification temporarily:
-  ```bash
-  # Windows
-  set LLM_VERIFY_SSL=false
-  npm run dev  # or start-dev.bat
-  
-  # Linux/Mac
-  export LLM_VERIFY_SSL=false
-  npm run dev  # or ./start-dev.sh
-  ```
-- **Production**: Always keep SSL verification enabled (default behavior)
+**HTTPS Certificate Trust:**
+- DocPilot uses the operating system trust store for cloud LLM providers.
+- This matches how Postman, browsers, and most Node SDKs trust corporate proxy certificates.
+- If you still see certificate errors, import the corporate/intercepting CA into the OS trust store for the user running DocPilot.
 
 **On Windows:**
 - If `python` command not found, use `py` or install Python properly
-- For certificate trust issues, run PowerShell as Administrator when installing certs
-- For SSL errors with cloud LLMs, use the `LLM_VERIFY_SSL=false` environment variable above
+- For certificate trust issues, install the certificate into Windows Trusted Root Certification Authorities for the account running DocPilot
 
 **On macOS/Linux:**
 - If permission denied on ports < 1024, use ports > 1024 or run with sudo (not recommended)

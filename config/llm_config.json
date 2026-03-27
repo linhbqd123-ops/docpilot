@@ -1,42 +1,21 @@
 {
     "providers": [
         {
-            "name": "local",
-            "base_url": "http://host.docker.internal:11434/v1",
-            "api_key": null,
-            "model": "qwen2.5",
-            "tier": "local",
-            "max_tokens": 4096,
-            "temperature": 0.3,
-            "timeout": 120,
-            "is_fallback": false
-        },
-        {
             "name": "groq",
             "base_url": "https://api.groq.com/openai/v1",
             "api_key": "",
-            "model": "llama-3.3-70b-versatile",
+            "model": "moonshotai/kimi-k2-instruct",
             "tier": "fast",
             "max_tokens": 4096,
             "temperature": 0.3,
             "timeout": 60,
-            "is_fallback": true,
-            "supports_json_schema": true
-        },
-        {
-            "name": "openrouter",
-            "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "",
-            "model": "anthropic/claude-3.5-sonnet",
-            "tier": "quality",
-            "max_tokens": 4096,
-            "temperature": 0.3,
-            "timeout": 120,
-            "is_fallback": true
+            "is_fallback": false,
+            "supports_json_schema": false,
+            "supports_json_strict": false
         }
     ],
     "default_provider": "groq",
     "auto_tier": "fast",
-    "max_retries": 3,
-    "json_retry_attempts": 2
+    "max_retries": 1,
+    "json_retry_attempts": 1
 }
