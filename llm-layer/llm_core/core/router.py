@@ -208,8 +208,9 @@ class LLMRouter:
                     self._validate_json_schema(parsed, json_schema)
                 return parsed
             except (json.JSONDecodeError, ValueError) as e:
+                error_msg = str(e)
                 logger.warning(
-                    f"JSON validation failed (attempt {attempt + 1}): {e}"
+                    f"JSON validation failed (attempt {attempt + 1}): {error_msg}"
                 )
                 if attempt < self.config.json_retry_attempts:
                     # Strengthen the system prompt for retry
@@ -217,11 +218,23 @@ class LLMRouter:
                         request.system_prompt += JSON_ENFORCEMENT_SUFFIX
                     else:
                         request.system_prompt = JSON_ENFORCEMENT_SUFFIX.strip()
-                    # Add a user message clarifying
-                    refine_message = (
-                        "Your previous response was not valid JSON. "
-                        "Please respond with ONLY a valid JSON object."
-                    )
+                    
+                    # Extract missing field from error message if possible
+                    missing_field = None
+                    if "Missing required field:" in error_msg:
+                        missing_field = error_msg.split("Missing required field:")[1].strip()
+                    
+                    # Add a user message with specific issue
+                    if missing_field:
+                        refine_message = (
+                            f"Your previous JSON was incomplete. The required field '{missing_field}' is missing. "
+                            f"Please provide the complete JSON object with ALL required fields."
+                        )
+                    else:
+                        refine_message = (
+                            "Your previous response was not valid JSON. "
+                            "Please respond with ONLY a valid JSON object, ensuring all required fields are present."
+                        )
                     request.messages.append(
                         {
                             "role": "user",

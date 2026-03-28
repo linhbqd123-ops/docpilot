@@ -10,11 +10,11 @@ if not exist "%ROOT%.venv\Scripts\python.exe" (
 	echo [setup] Creating virtualenv at %ROOT%.venv ...
 	python -m venv "%ROOT%.venv"
 	echo [setup] Installing doc-mcp-service requirements...
-	"%ROOT%.venv\Scripts\pip.exe" install -r "%ROOT%doc-mcp-service\requirements.txt"
+	"%ROOT%.venv\Scripts\pip3.exe" install -r "%ROOT%doc-mcp-service\requirements.txt"
 	echo [setup] Installing agent-backend requirements...
-	"%ROOT%.venv\Scripts\pip.exe" install -r "%ROOT%agent-backend\requirements.txt"
+	"%ROOT%.venv\Scripts\pip3.exe" install -r "%ROOT%agent-backend\requirements.txt"
 	echo [setup] Installing llm-layer requirements...
-	"%ROOT%.venv\Scripts\pip.exe" install -r "%ROOT%llm-layer\requirements.txt"
+	"%ROOT%.venv\Scripts\pip3.exe" install -r "%ROOT%llm-layer\requirements.txt"
 	echo [setup] Bootstrap complete.
 ) else (
 	echo [setup] Virtualenv found at %ROOT%.venv — reusing it.
@@ -27,8 +27,10 @@ start "DOC-MCP Service" cmd /c "cd /d %ROOT%doc-mcp-service && "%ROOT%.venv\Scri
 timeout /t 2 /nobreak >nul
 
 echo [2/3] Starting Agent Backend (port 8000)...
-REM Load environment variables from .env file
-for /f "tokens=*" %%i in ('type "%ROOT%.env" 2^>nul') do set %%i
+REM Load environment variables from .env file (skip comment lines)
+for /f "usebackq eol=# tokens=*" %%i in ("%ROOT%.env") do (
+	if not "%%i"=="" set "%%i"
+)
 start "Agent Backend" cmd /c "cd /d %ROOT%agent-backend && (if defined PYTHONPATH (set PYTHONPATH=%ROOT%llm-layer;%PYTHONPATH%) else (set PYTHONPATH=%ROOT%llm-layer)) && echo Starting uvicorn with auto-reload... && "%ROOT%.venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-include *.py 2>agent_backend_error.log || (echo Agent backend failed to start. Check agent_backend_error.log for details && pause)"
 
 timeout /t 2 /nobreak >nul

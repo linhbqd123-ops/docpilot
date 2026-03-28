@@ -7,7 +7,7 @@
             "model": "moonshotai/kimi-k2-instruct",
             "tier": "fast",
             "max_tokens": 4096,
-            "temperature": 0.3,
+            "temperature": 0.7,
             "timeout": 60,
             "is_fallback": false,
             "supports_json_schema": false,
@@ -16,6 +16,6 @@
     ],
     "default_provider": "groq",
     "auto_tier": "fast",
-    "max_retries": 1,
-    "json_retry_attempts": 1
+    "max_retries": 2,
+    "json_retry_attempts": 2
 }

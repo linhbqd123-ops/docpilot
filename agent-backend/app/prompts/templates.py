@@ -30,6 +30,7 @@ PRESERVE_CHANGES_SCHEMA = {
     "name": "preserve_changes",
     "type": "object",
     "properties": {
+        # NOTE: REQUIRED FIELDS: changes, summary - MUST INCLUDE BOTH OR RESPONSE WILL FAIL
         "changes": {
             "type": "array",
             "items": {
@@ -64,6 +65,7 @@ REBUILD_BLOCKS_SCHEMA = {
     "name": "rebuild_blocks",
     "type": "object",
     "properties": {
+        # NOTE: REQUIRED FIELDS: blocks, summary - MUST INCLUDE BOTH OR RESPONSE WILL FAIL
         "blocks": {
             "type": "array",
             "items": {
