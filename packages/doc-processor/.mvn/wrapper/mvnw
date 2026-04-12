@@ -1,0 +1,21 @@
+#!/bin/sh
+# Maven Wrapper startup script
+# Downloads maven if not present, then runs it
+
+set -e
+
+BASEDIR=$(dirname "$(readlink -f "$0")")
+MAVEN_TMP="$BASEDIR/.mvn/wrapper/downloads"
+MAVEN_URL="https://dlcdn.apache.org/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.zip"
+MAVEN_EXTRACTED="$BASEDIR/.mvn/wrapper/apache-maven-3.9.6"
+
+if [ ! -d "$MAVEN_EXTRACTED" ]; then
+    mkdir -p "$MAVEN_TMP"
+    echo "Downloading Maven 3.9.6..."
+    wget -q "$MAVEN_URL" -O "$MAVEN_TMP/maven.zip"
+    unzip -q "$MAVEN_TMP/maven.zip" -d "$BASEDIR/.mvn/wrapper/"
+    rm "$MAVEN_TMP/maven.zip"
+fi
+
+export JAVA_HOME
+exec "$MAVEN_EXTRACTED/bin/mvn" "$@"

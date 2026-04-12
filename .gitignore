@@ -1,0 +1,94 @@
+# DocPilot monorepo .gitignore
+# Covers: Node (packages/desktop), Java/Maven (doc-processor), IDEs, OS, caches, logs
+
+# --------------------
+# Node / JavaScript
+# --------------------
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+**/dist/
+**/build/
+**/out/
+*.tgz
+.vite/
+.parcel-cache/
+.cache/
+.eslintcache
+
+# TypeScript incremental files
+*.tsbuildinfo
+
+# --------------------
+# Logs & coverage
+# --------------------
+logs/
+**/logs/
+*.log
+coverage/
+**/coverage/
+.nyc_output/
+
+# --------------------
+# Environment files
+# --------------------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --------------------
+# Java / Maven
+# --------------------
+**/target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Gradle caches/builds
+.gradle/
+**/.gradle/
+
+# --------------------
+# IDEs / editors
+# --------------------
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+.settings/
+.classpath
+.project
+
+# --------------------
+# OS
+# --------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# --------------------
+# Temp / swap / misc
+# --------------------
+*~
+*.swp
+*.swo
+*.tmp
+*.temp
+*.lock
+
+# --------------------
+# Project-specific runtime data (ignore uploads/logs)
+# --------------------
+doc-processor/data/uploads/
+doc-processor/logs/
+
+# Optional local plan files
+plan/

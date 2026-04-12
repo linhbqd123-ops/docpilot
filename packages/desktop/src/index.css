@@ -1,0 +1,233 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root,
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --docpilot-bg: 8 12 20;
+    --docpilot-shell: 13 18 28;
+    --docpilot-rail: 17 23 35;
+    --docpilot-sidebar: 18 24 36;
+    --docpilot-surface: 14 20 30;
+    --docpilot-panel: 20 27 40;
+    --docpilot-panel-alt: 28 36 52;
+    --docpilot-hover: 36 46 64;
+    --docpilot-border: 42 50 66;
+    --docpilot-text: 214 222 238;
+    --docpilot-text-strong: 248 251 255;
+    --docpilot-muted: 145 156 176;
+    --docpilot-accent: 74 158 255;
+    --docpilot-accent-hover: 103 176 255;
+    --docpilot-accent-contrast: 255 255 255;
+    --docpilot-accent-soft: 25 52 85;
+    --docpilot-success: 80 186 124;
+    --docpilot-success-soft: 20 66 47;
+    --docpilot-success-text: 213 246 224;
+    --docpilot-warning: 214 168 77;
+    --docpilot-warning-soft: 74 57 23;
+    --docpilot-warning-text: 255 236 196;
+    --docpilot-danger: 224 102 102;
+    --docpilot-danger-soft: 78 31 35;
+    --docpilot-danger-text: 255 213 213;
+    --docpilot-paper: 245 239 228;
+    --docpilot-paper-border: 222 215 199;
+    --docpilot-ink: 34 40 52;
+    --docpilot-selection: rgba(74, 158, 255, 0.22);
+    --docpilot-selection-text: 255 255 255;
+    --docpilot-mesh: radial-gradient(circle at top left, rgba(74, 158, 255, 0.16), transparent 34%), radial-gradient(circle at top right, rgba(80, 186, 124, 0.1), transparent 28%), linear-gradient(180deg, #090d15 0%, #0d1320 100%);
+    --docpilot-shadow-glow: 0 0 0 1px rgba(74, 158, 255, 0.16), 0 28px 80px rgba(2, 8, 24, 0.42);
+    --docpilot-shadow-active: 0 10px 24px rgba(74, 158, 255, 0.22);
+    --docpilot-shadow-paper: 0 28px 70px rgba(5, 8, 14, 0.28);
+    --scrollbar-thumb: rgba(152, 163, 191, 0.28);
+    --scrollbar-thumb-hover: rgba(152, 163, 191, 0.42);
+    --scrollbar-track: transparent;
+    --scrollbar-width: 10px;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --docpilot-bg: 243 243 243;
+    --docpilot-shell: 247 247 247;
+    --docpilot-rail: 242 242 242;
+    --docpilot-sidebar: 243 243 243;
+    --docpilot-surface: 255 255 255;
+    --docpilot-panel: 255 255 255;
+    --docpilot-panel-alt: 248 248 248;
+    --docpilot-hover: 238 242 246;
+    --docpilot-border: 228 228 228;
+    --docpilot-text: 60 60 60;
+    --docpilot-text-strong: 30 30 30;
+    --docpilot-muted: 97 97 97;
+    --docpilot-accent: 0 122 204;
+    --docpilot-accent-hover: 0 103 172;
+    --docpilot-accent-contrast: 255 255 255;
+    --docpilot-accent-soft: 230 241 252;
+    --docpilot-success: 28 129 73;
+    --docpilot-success-soft: 231 244 236;
+    --docpilot-success-text: 25 102 55;
+    --docpilot-warning: 166 107 0;
+    --docpilot-warning-soft: 255 244 206;
+    --docpilot-warning-text: 102 72 13;
+    --docpilot-danger: 205 61 61;
+    --docpilot-danger-soft: 252 236 236;
+    --docpilot-danger-text: 161 44 48;
+    --docpilot-paper: 255 255 255;
+    --docpilot-paper-border: 228 228 228;
+    --docpilot-ink: 34 40 52;
+    --docpilot-selection: rgba(0, 122, 204, 0.16);
+    --docpilot-selection-text: 30 30 30;
+    --docpilot-mesh: linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(243, 243, 243, 0.98) 100%), radial-gradient(circle at top left, rgba(0, 122, 204, 0.05), transparent 32%);
+    --docpilot-shadow-glow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 14px 34px rgba(31, 35, 40, 0.06);
+    --docpilot-shadow-active: 0 8px 18px rgba(0, 122, 204, 0.12);
+    --docpilot-shadow-paper: 0 20px 55px rgba(57, 76, 108, 0.12);
+    --scrollbar-thumb: rgba(108, 108, 108, 0.35);
+    --scrollbar-thumb-hover: rgba(108, 108, 108, 0.52);
+    --scrollbar-track: rgba(0, 0, 0, 0.04);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply m-0 overflow-hidden bg-docpilot-bg bg-mesh text-docpilot-text antialiased;
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  input[type="checkbox"] {
+    accent-color: rgb(var(--docpilot-accent));
+  }
+
+  ::selection {
+    background: var(--docpilot-selection);
+    color: rgb(var(--docpilot-selection-text));
+  }
+
+  /* Global scrollbar styles so scrollable elements inherit consistently */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar {
+    width: var(--scrollbar-width);
+    height: var(--scrollbar-width);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--scrollbar-thumb);
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+  }
+}
+
+@layer components {
+  .panel-shell {
+    @apply rounded-2xl border border-docpilot-border bg-docpilot-surface shadow-glow backdrop-blur;
+  }
+
+  .panel-card {
+    @apply rounded-2xl border border-docpilot-border bg-docpilot-panel backdrop-blur;
+  }
+
+  .panel-header {
+    @apply border-b border-docpilot-border px-5 py-4;
+  }
+
+  .panel-title {
+    @apply mt-1 text-lg font-semibold text-docpilot-textStrong;
+  }
+
+  .subtle-card {
+    @apply rounded-2xl border border-docpilot-border bg-docpilot-panelAlt;
+  }
+
+  .subtle-card-dashed {
+    @apply rounded-2xl border border-dashed border-docpilot-border bg-docpilot-panelAlt;
+  }
+
+  .field-shell {
+    @apply rounded-xl border border-docpilot-border bg-docpilot-panelAlt px-3 py-2 text-sm text-docpilot-text outline-none transition focus:border-docpilot-accent focus:ring-2 focus:ring-docpilot-accent/20;
+  }
+
+  .action-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-border bg-docpilot-panelAlt px-3 py-2 text-sm font-medium text-docpilot-text transition hover:border-docpilot-accent/40 hover:bg-docpilot-hover disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .action-button-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-accent bg-docpilot-accent px-3 py-2 text-sm font-semibold text-docpilot-accentContrast transition hover:border-docpilot-accentHover hover:bg-docpilot-accentHover disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-2 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted;
+  }
+
+  .theme-card {
+    @apply rounded-2xl border border-docpilot-border bg-docpilot-panel px-4 py-3 transition hover:border-docpilot-accent/30 hover:bg-docpilot-hover;
+  }
+
+  .theme-card-active {
+    @apply border-docpilot-accent/40 bg-docpilot-accentSoft shadow-active;
+  }
+
+  .theme-card-swatches {
+    @apply mt-4 grid grid-cols-5 gap-2;
+  }
+
+  .theme-card-swatch {
+    @apply h-7 rounded-lg border shadow-sm;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--scrollbar-thumb);
+    background-clip: padding-box;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+  }
+}
