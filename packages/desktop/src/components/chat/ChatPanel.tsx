@@ -1,4 +1,4 @@
-import { Bot, LoaderCircle, Send, Square, User, RotateCcw } from "lucide-react";
+import { Bot, LoaderCircle, Send, Square, User, RotateCcw, Plus, X } from "lucide-react";
 
 import { useAppContext } from "@/app/context";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -24,17 +24,29 @@ export function ChatPanel() {
   const {
     state,
     selectedDocument,
-    currentMessages,
     updateComposer,
     sendMessage,
     cancelRequest,
     clearChat,
+    createNewChat,
+    selectChat,
+    deleteChat,
   } = useAppContext();
 
+  const [showChatList, setShowChatList] = useState(false);
   const [inputHeight, setInputHeight] = useState(140); // Default height for input area
   const [isResizing, setIsResizing] = useState(false);
   const dividerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const messageChatId = state.selectedChatId || selectedDocument?.id;
+  const currentMessages = messageChatId
+    ? state.messageThreads[messageChatId] ?? []
+    : [];
+
+  const documentChats = selectedDocument
+    ? state.chats.filter((chat) => chat.documentId === selectedDocument.id)
+    : [];
 
   // Handle vertical resize of input area
   useEffect(() => {
@@ -82,36 +94,81 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col" ref={containerRef}>
-      <div className="flex items-center justify-between border-b border-docpilot-border px-4 py-4">
-        <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-docpilot-muted">Assistant</p>
-          <h2 className="mt-1 text-lg font-semibold text-docpilot-textStrong">DocPilot Session</h2>
-        </div>
-        <div className="flex items-center gap-3">
-          {currentMessages.length > 0 && selectedDocument ? (
-            <button
-              type="button"
-              className="action-button"
-              onClick={clearChat}
-              title="Clear conversation and start a new chat"
-            >
-              <RotateCcw size={14} /> New Chat
-            </button>
-          ) : null}
-          <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
-            <span
-              className={cn(
-                "h-2.5 w-2.5 rounded-full",
-                state.connection.status === "online"
-                  ? "bg-docpilot-success"
-                  : state.connection.status === "checking"
-                    ? "bg-docpilot-warning"
-                    : "bg-docpilot-danger",
-              )}
-            />
-            <span>{state.settings.provider}</span>
+      <div className="border-b border-docpilot-border">
+        <div className="flex items-center justify-between px-4 py-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.22em] text-docpilot-muted">Assistant</p>
+            <h2 className="mt-1 text-lg font-semibold text-docpilot-textStrong">DocPilot Session</h2>
+          </div>
+          <div className="flex items-center gap-3">
+            {selectedDocument ? (
+              <button
+                type="button"
+                className="action-button"
+                onClick={() => createNewChat()}
+                title="Create a new chat for this document"
+              >
+                <Plus size={14} /> New Chat
+              </button>
+            ) : null}
+            <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
+              <span
+                className={cn(
+                  "h-2.5 w-2.5 rounded-full",
+                  state.connection.status === "online"
+                    ? "bg-docpilot-success"
+                    : state.connection.status === "checking"
+                      ? "bg-docpilot-warning"
+                      : "bg-docpilot-danger",
+                )}
+              />
+              <span>{state.settings.provider}</span>
+            </div>
           </div>
         </div>
+
+        {/* Chat list */}
+        {documentChats.length > 0 && (
+          <div className="border-t border-docpilot-border px-4 py-3">
+            <button
+              type="button"
+              className="text-xs text-docpilot-muted hover:text-docpilot-text flex items-center gap-1 w-full text-left"
+              onClick={() => setShowChatList(!showChatList)}
+            >
+              <span>{showChatList ? "▼" : "▶"}</span>
+              <span>Saved Chats ({documentChats.length})</span>
+            </button>
+
+            {showChatList && (
+              <div className="scrollbar-thin mt-2 max-h-40 space-y-1 overflow-y-auto">
+                {documentChats.map((chat) => (
+                  <div
+                    key={chat.id}
+                    className={cn(
+                      "flex items-center justify-between rounded-lg px-2 py-1.5 text-xs transition cursor-pointer",
+                      state.selectedChatId === chat.id
+                        ? "bg-docpilot-accentSoft text-docpilot-accent"
+                        : "text-docpilot-muted hover:bg-docpilot-hover hover:text-docpilot-text",
+                    )}
+                    onClick={() => selectChat(chat.id)}
+                  >
+                    <span className="truncate">{chat.name}</span>
+                    <button
+                      type="button"
+                      className="action-button shrink-0 ml-1 p-0.5"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteChat(chat.id);
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="scrollbar-thin flex-1 space-y-5 overflow-y-auto px-4 py-4">

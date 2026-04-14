@@ -326,3 +326,68 @@ export class HTTPClient {
     return { data };
   }
 }
+
+// Chat history API
+export async function loadChatsFromBackend(baseUrl: string) {
+  const response = await fetch(joinUrl(baseUrl, "/api/chats"), {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to load chats", response.status);
+  }
+
+  const payload = (await response.json()) as { chats: unknown[] };
+  return payload.chats;
+}
+
+export async function saveChat(
+  baseUrl: string,
+  chat: { name: string; documentId: string; messages: ChatMessage[] },
+) {
+  const response = await fetch(joinUrl(baseUrl, "/api/chats"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(chat),
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to save chat", response.status);
+  }
+
+  const payload = (await response.json()) as { chat: unknown };
+  return payload.chat;
+}
+
+export async function updateChat(
+  baseUrl: string,
+  chatId: string,
+  updates: { name?: string; messages?: ChatMessage[] },
+) {
+  const response = await fetch(joinUrl(baseUrl, `/api/chats/${chatId}`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to update chat", response.status);
+  }
+
+  const payload = (await response.json()) as { chat: unknown };
+  return payload.chat;
+}
+
+export async function deleteChat(baseUrl: string, chatId: string) {
+  const response = await fetch(joinUrl(baseUrl, `/api/chats/${chatId}`), {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to delete chat", response.status);
+  }
+
+  return { ok: true };
+}

@@ -2,7 +2,6 @@ package io.docpilot.processor.converter;
 
 import io.docpilot.processor.exception.ConversionException;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDDocumentInformation;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -12,7 +11,7 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Extracts plain text from a PDF file using Apache PDFBox 3.x.
+ * Extracts plain text from a PDF file using Apache PDFBox 2.x.
  *
  * <p>PDFBox is used instead of docx4j here — it is purpose-built for PDF
  * reading and handles encrypted, compressed, and image-heavy PDFs reliably.
@@ -33,7 +32,7 @@ public class PdfToTextConverter {
             throw new ConversionException("Cannot read PDF input: " + e.getMessage(), e);
         }
 
-        try (PDDocument doc = Loader.loadPDF(pdfBytes)) {
+        try (PDDocument doc = PDDocument.load(pdfBytes)) {
             int pageCount = doc.getNumberOfPages();
             PDDocumentInformation info = doc.getDocumentInformation();
 

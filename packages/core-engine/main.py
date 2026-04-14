@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.chat import router as chat_router
+from api.chats import router as chats_router
 from api.documents import router as documents_router
 from api.health import router as health_router
 from api.keys import router as keys_router
@@ -38,6 +39,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(keys_router)
+app.include_router(chats_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
 

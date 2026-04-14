@@ -42,6 +42,15 @@ export interface ChatMessage {
   status?: "streaming" | "sent" | "error";
 }
 
+export interface Chat {
+  id: string;
+  name: string;
+  documentId: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AppSettings {
   apiBaseUrl: string;
   providerEndpoint?: string;
@@ -65,6 +74,8 @@ export interface ConnectionState {
 export interface PersistedState {
   documents: DocumentRecord[];
   selectedDocumentId: string | null;
+  chats: Chat[];
+  selectedChatId: string | null;
   messageThreads: Record<string, ChatMessage[]>;
   settings: AppSettings;
   activeSidebarView: SidebarView;

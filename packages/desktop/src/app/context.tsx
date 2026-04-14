@@ -7,10 +7,10 @@ import {
   type PropsWithChildren,
 } from "react";
 
-import type { AppSettings, AppState, ChatMessage, DocumentRecord, SidebarView } from "@/app/types";
+import type { AppSettings, AppState, Chat, ChatMessage, DocumentRecord, SidebarView } from "@/app/types";
 import { appReducer, createInitialState } from "@/app/reducer";
 import { getThemeDefinition } from "@/app/themes";
-import { checkBackendHealth, exportDocumentToDocx, getErrorMessage, importDocumentFromBackend, sendPromptToBackend, checkProviderConnection } from "@/lib/api";
+import { checkBackendHealth, exportDocumentToDocx, getErrorMessage, importDocumentFromBackend, sendPromptToBackend, checkProviderConnection, loadChatsFromBackend, saveChat, updateChat, deleteChat as deleteChatApi } from "@/lib/api";
 import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
 import { loadPersistedState, savePersistedState } from "@/lib/storage";
 
@@ -33,6 +33,10 @@ interface AppContextValue {
   exportDocument: () => Promise<void>;
   clearBanner: () => void;
   clearChat: () => void;
+  createNewChat: () => void;
+  selectChat: (chatId: string | null) => void;
+  deleteChat: (chatId: string) => void;
+  renameChat: (chatId: string, name: string) => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -50,7 +54,7 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     savePersistedState(state);
-  }, [state.documents, state.selectedDocumentId, state.messageThreads, state.settings, state.activeSidebarView]);
+  }, [state.documents, state.selectedDocumentId, state.chats, state.selectedChatId, state.messageThreads, state.settings, state.activeSidebarView]);
 
   useEffect(() => {
     const theme = getThemeDefinition(state.settings.theme);
@@ -62,6 +66,24 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (state.settings.connectOnStartup && state.settings.apiBaseUrl.trim()) {
       void testConnection();
+    }
+  }, []);
+
+  useEffect(() => {
+    // Load chats from backend on startup
+    if (state.settings.apiBaseUrl.trim()) {
+      loadChatsFromBackend(state.settings.apiBaseUrl)
+        .then((chats) => {
+          if (Array.isArray(chats) && chats.length > 0) {
+            chats.forEach((chat: any) => {
+              dispatch({ type: "createChat", payload: { chat } });
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to load chats from backend:", error);
+          // Silently fail - continue with local chats
+        });
     }
   }, []);
 
@@ -207,6 +229,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
+    // Determine which thread to add messages to (current chat or document)
+    const messageThreadId = state.selectedChatId || selectedDocument.id;
+
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -223,8 +248,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       status: "streaming",
     };
 
-    dispatch({ type: "addMessage", payload: { documentId: selectedDocument.id, message: userMessage } });
-    dispatch({ type: "addMessage", payload: { documentId: selectedDocument.id, message: assistantMessage } });
+    dispatch({ type: "addMessage", payload: { documentId: messageThreadId, message: userMessage } });
+    dispatch({ type: "addMessage", payload: { documentId: messageThreadId, message: assistantMessage } });
     dispatch({ type: "setComposer", payload: "" });
     dispatch({ type: "setIsSending", payload: true });
     dispatch({ type: "setBanner", payload: null });
@@ -245,7 +270,7 @@ export function AppProvider({ children }: PropsWithChildren) {
           dispatch({
             type: "updateMessage",
             payload: {
-              documentId: selectedDocument.id,
+              documentId: messageThreadId,
               messageId: assistantMessage.id,
               patch: { content: accumulated, status: "streaming" },
             },
@@ -256,11 +281,25 @@ export function AppProvider({ children }: PropsWithChildren) {
       dispatch({
         type: "updateMessage",
         payload: {
-          documentId: selectedDocument.id,
+          documentId: messageThreadId,
           messageId: assistantMessage.id,
           patch: { content: reply.message || accumulated, status: "sent" },
         },
       });
+
+      // Sync messages to backend if this is a chat
+      if (state.selectedChatId && state.settings.apiBaseUrl.trim()) {
+        const updatedMessageThread: ChatMessage[] = [
+          ...currentMessages,
+          userMessage,
+          { ...assistantMessage, content: reply.message || accumulated, status: "sent" as "sent" },
+        ];
+        updateChat(state.settings.apiBaseUrl, state.selectedChatId, {
+          messages: updatedMessageThread,
+        }).catch((error) => {
+          console.error("Failed to sync messages to backend:", error);
+        });
+      }
 
       if (reply.documentHtml) {
         dispatch({
@@ -366,6 +405,60 @@ export function AppProvider({ children }: PropsWithChildren) {
     dispatch({ type: "setComposer", payload: "" });
   }
 
+  function createNewChat() {
+    if (!selectedDocument) {
+      return;
+    }
+
+    const chat: Chat = {
+      id: crypto.randomUUID(),
+      name: `Chat ${new Date().toLocaleTimeString()}`,
+      documentId: selectedDocument.id,
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    dispatch({ type: "createChat", payload: { chat } });
+    dispatch({ type: "setComposer", payload: "" });
+
+    // Sync to backend
+    if (state.settings.apiBaseUrl.trim()) {
+      saveChat(state.settings.apiBaseUrl, chat).catch((error) => {
+        console.error("Failed to save chat to backend:", error);
+        dispatch({ type: "setBanner", payload: "Chat created locally, but failed to save to backend." });
+      });
+    }
+  }
+
+  function selectChat(chatId: string | null) {
+    dispatch({ type: "selectChat", payload: chatId });
+    dispatch({ type: "setComposer", payload: "" });
+  }
+
+  function deleteChat(chatId: string) {
+    // Sync to backend first
+    if (state.settings.apiBaseUrl.trim()) {
+      deleteChatApi(state.settings.apiBaseUrl, chatId).catch((error) => {
+        console.error("Failed to delete chat from backend:", error);
+        dispatch({ type: "setBanner", payload: "Chat deleted locally, but failed to remove from backend." });
+      });
+    }
+    dispatch({ type: "deleteChat", payload: chatId });
+  }
+
+  function renameChat(chatId: string, newName: string) {
+    dispatch({ type: "renameChat", payload: { chatId, name: newName } });
+
+    // Sync to backend
+    if (state.settings.apiBaseUrl.trim()) {
+      updateChat(state.settings.apiBaseUrl, chatId, { name: newName }).catch((error) => {
+        console.error("Failed to update chat on backend:", error);
+        dispatch({ type: "setBanner", payload: "Chat renamed locally, but failed to update on backend." });
+      });
+    }
+  }
+
   return (
     <AppContext.Provider
       value={{
@@ -387,6 +480,10 @@ export function AppProvider({ children }: PropsWithChildren) {
         exportDocument,
         clearBanner,
         clearChat,
+        createNewChat,
+        selectChat,
+        deleteChat,
+        renameChat,
       }}
     >
       {children}

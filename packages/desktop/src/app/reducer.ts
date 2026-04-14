@@ -1,4 +1,4 @@
-import type { AppSettings, AppState, ChatMessage, ConnectionState, DocumentRecord, PersistedState, SidebarView } from "@/app/types";
+import type { AppSettings, AppState, Chat, ChatMessage, ConnectionState, DocumentRecord, PersistedState, SidebarView } from "@/app/types";
 import { DEFAULT_THEME, isThemeMode } from "@/app/themes";
 import { commitPendingDocument, discardPendingDocument, stageDocumentHtml, updateDocumentHtml } from "@/lib/document";
 
@@ -26,6 +26,8 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
   return {
     documents: persisted.documents ?? [],
     selectedDocumentId: persisted.selectedDocumentId ?? null,
+    chats: persisted.chats ?? [],
+    selectedChatId: persisted.selectedChatId ?? null,
     messageThreads: persisted.messageThreads ?? {},
     settings: {
       ...DEFAULT_SETTINGS,
@@ -55,6 +57,10 @@ type Action =
   | { type: "addMessage"; payload: { documentId: string; message: ChatMessage } }
   | { type: "updateMessage"; payload: { documentId: string; messageId: string; patch: Partial<ChatMessage> } }
   | { type: "clearMessages"; payload: string }
+  | { type: "createChat"; payload: { chat: Chat } }
+  | { type: "selectChat"; payload: string | null }
+  | { type: "deleteChat"; payload: string }
+  | { type: "renameChat"; payload: { chatId: string; name: string } }
   | { type: "stageDocument"; payload: { documentId: string; html: string } }
   | { type: "acceptPending"; payload: { documentId: string } }
   | { type: "discardPending"; payload: { documentId: string } }
@@ -171,6 +177,52 @@ export function appReducer(state: AppState, action: Action): AppState {
         messageThreads,
       };
     }
+
+    case "createChat": {
+      const newChats = [action.payload.chat, ...state.chats];
+      return {
+        ...state,
+        chats: newChats,
+        selectedChatId: action.payload.chat.id,
+        messageThreads: {
+          ...state.messageThreads,
+          [action.payload.chat.id]: action.payload.chat.messages,
+        },
+      };
+    }
+
+    case "selectChat":
+      return {
+        ...state,
+        selectedChatId: action.payload,
+      };
+
+    case "deleteChat": {
+      const chats = state.chats.filter((chat) => chat.id !== action.payload);
+      const messageThreads = { ...state.messageThreads };
+      delete messageThreads[action.payload];
+
+      return {
+        ...state,
+        chats,
+        messageThreads,
+        selectedChatId:
+          state.selectedChatId === action.payload ? chats[0]?.id ?? null : state.selectedChatId,
+      };
+    }
+
+    case "renameChat": {
+      return {
+        ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === action.payload.chatId
+            ? { ...chat, name: action.payload.name, updatedAt: Date.now() }
+            : chat,
+        ),
+      };
+    }
+
+    case "stageDocument":
       return {
         ...state,
         documents: state.documents.map((document) =>
@@ -185,8 +237,6 @@ export function appReducer(state: AppState, action: Action): AppState {
           document.id === action.payload.documentId ? commitPendingDocument(document) : document,
         ),
       };
-
-    case "discardPending":
       return {
         ...state,
         documents: state.documents.map((document) =>
