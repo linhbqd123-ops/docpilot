@@ -12,7 +12,7 @@ import { SidebarItem } from "./SidebarItem";
 
 function ResizeGrip() {
   return (
-    <PanelResizeHandle className="group relative flex w-3 shrink-0 items-center justify-center bg-transparent">
+    <PanelResizeHandle className="group relative -mx-1.5 flex w-3 shrink-0 items-center justify-center bg-transparent">
       <div className="h-full w-px bg-docpilot-border transition group-hover:bg-docpilot-accent/40" />
       <div className="absolute h-12 w-1 rounded-full bg-docpilot-hover opacity-0 transition group-hover:opacity-100" />
     </PanelResizeHandle>
@@ -75,19 +75,19 @@ export function AppLayout() {
           <div className="min-h-0 flex-1 p-3 pt-4">
             <div className="panel-shell flex h-full min-h-0 overflow-hidden">
               <PanelGroup direction="horizontal" className="min-h-0 flex-1">
-                <Panel defaultSize={21} minSize={18} maxSize={28} className="min-h-0">
+                <Panel defaultSize={21} minSize={15} maxSize={25} className="min-h-0 min-w-0" collapsible={false}>
                   <Sidebar />
                 </Panel>
 
                 <ResizeGrip />
 
-                <Panel defaultSize={49} minSize={30} className="min-h-0">
+                <Panel defaultSize={49} minSize={35} maxSize={60} className="min-h-0 min-w-0" collapsible={false}>
                   <DocumentWorkspace />
                 </Panel>
 
                 <ResizeGrip />
 
-                <Panel defaultSize={30} minSize={24} className="min-h-0">
+                <Panel defaultSize={30} minSize={26} maxSize={50} className="min-h-0 min-w-0" collapsible={false}>
                   <ChatPanel />
                 </Panel>
               </PanelGroup>

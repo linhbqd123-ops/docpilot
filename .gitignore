@@ -90,5 +90,4 @@ ehthumbs.db
 doc-processor/data/uploads/
 doc-processor/logs/
 
-# Optional local plan files
-plan/
+.venv/

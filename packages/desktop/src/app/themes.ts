@@ -4,7 +4,7 @@ export const THEME_REGISTRY = {
     label: "Midnight",
     shortLabel: "Dark",
     appearance: "dark",
-    description: "Dense contrast for long editing sessions and low-light work.",
+    description: "Dense contrast.",
     preview: {
       chrome: "#111723",
       panel: "#1b2434",
@@ -18,7 +18,7 @@ export const THEME_REGISTRY = {
     label: "Light+",
     shortLabel: "Light+",
     appearance: "light",
-    description: "VS Code inspired light workspace with neutral panels and editor-blue accents.",
+    description: "Pretty light.",
     preview: {
       chrome: "#f3f3f3",
       panel: "#ffffff",

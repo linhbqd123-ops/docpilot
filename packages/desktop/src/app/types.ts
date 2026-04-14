@@ -26,6 +26,8 @@ export interface DocumentRecord {
   wordCount: number;
   createdAt: number;
   updatedAt: number;
+  /** docId assigned by the Java doc-processor; used for DOCX export to restore original styles. */
+  backendDocId?: string;
   error?: string;
   pendingHtml?: string;
   pendingOutline?: OutlineItem[];
@@ -42,7 +44,11 @@ export interface ChatMessage {
 
 export interface AppSettings {
   apiBaseUrl: string;
-  provider: "ollama" | "openai" | "anthropic" | "azure" | "custom";
+  providerEndpoint?: string;
+  provider: "ollama" | "openai" | "groq" | "openrouter" | "together" | "zai" | "anthropic" | "azure" | "custom";
+  /** Optional model override — sent as the `model` field in /api/chat requests.
+   *  If empty, the backend uses its default model for the selected provider. */
+  modelOverride: string;
   requestTimeoutMs: number;
   streaming: boolean;
   connectOnStartup: boolean;

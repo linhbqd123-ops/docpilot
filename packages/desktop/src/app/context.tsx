@@ -10,8 +10,8 @@ import {
 import type { AppSettings, AppState, ChatMessage, DocumentRecord, SidebarView } from "@/app/types";
 import { appReducer, createInitialState } from "@/app/reducer";
 import { getThemeDefinition } from "@/app/themes";
-import { checkBackendHealth, getErrorMessage, sendPromptToBackend } from "@/lib/api";
-import { createDocumentFromFile } from "@/lib/document";
+import { checkBackendHealth, exportDocumentToDocx, getErrorMessage, importDocumentFromBackend, sendPromptToBackend, checkProviderConnection } from "@/lib/api";
+import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
 import { loadPersistedState, savePersistedState } from "@/lib/storage";
 
 interface AppContextValue {
@@ -30,7 +30,9 @@ interface AppContextValue {
   acceptPendingChanges: () => void;
   discardPendingChanges: () => void;
   updateSelectedDocumentHtml: (html: string) => void;
+  exportDocument: () => Promise<void>;
   clearBanner: () => void;
+  clearChat: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -73,11 +75,52 @@ export function AppProvider({ children }: PropsWithChildren) {
         dispatch({ type: "selectDocument", payload: document.id });
 
         if (document.status === "needs_backend") {
-          dispatch({
-            type: "setBanner",
-            payload: `${document.name} needs the backend import endpoint before it can be rendered.`,
-          });
-          dispatch({ type: "setActiveSidebarView", payload: "connect" });
+          if (!state.settings.apiBaseUrl.trim()) {
+            dispatch({
+              type: "setBanner",
+              payload: `${document.name} requires the backend. Set the backend URL in the Connect panel.`,
+            });
+            dispatch({ type: "setActiveSidebarView", payload: "connect" });
+            continue;
+          }
+
+          // Automatically convert via backend
+          dispatch({ type: "setBanner", payload: `Importing ${document.name}…` });
+          try {
+            const result = await importDocumentFromBackend({
+              settings: state.settings,
+              file,
+            });
+            const normalized = normalizeDocumentHtml(result.html);
+            dispatch({
+              type: "upsertDocument",
+              payload: {
+                ...document,
+                status: "ready",
+                html: normalized.html,
+                outline: normalized.outline,
+                wordCount: normalized.wordCount,
+                backendDocId: result.docId,
+                error: undefined,
+                updatedAt: Date.now(),
+              },
+            });
+            dispatch({ type: "setBanner", payload: null });
+          } catch (importError) {
+            dispatch({
+              type: "upsertDocument",
+              payload: {
+                ...document,
+                status: "error",
+                error: getErrorMessage(importError),
+                updatedAt: Date.now(),
+              },
+            });
+            dispatch({
+              type: "setBanner",
+              payload: `Failed to import ${document.name}: ${getErrorMessage(importError)}`,
+            });
+          }
         }
       } catch (error) {
         dispatch({ type: "setBanner", payload: `Failed to import file: ${getErrorMessage(error)}` });
@@ -106,10 +149,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   }
 
   async function testConnection() {
-    const baseUrl = state.settings.apiBaseUrl.trim();
+    const providerUrl = (state.settings.providerEndpoint ?? "").trim();
 
-    if (!baseUrl) {
-      dispatch({ type: "setBanner", payload: "Set the backend URL before running a connection check." });
+    if (!providerUrl) {
+      dispatch({ type: "setBanner", payload: "Set the Provider Endpoint before running a connection check." });
       return;
     }
 
@@ -119,17 +162,19 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
 
     try {
-      const result = await checkBackendHealth(baseUrl, state.settings.requestTimeoutMs);
+      console.log("Testing provider connection to", providerUrl);
+      await checkProviderConnection(providerUrl, state.settings.requestTimeoutMs);
+
       dispatch({
         type: "setConnection",
         payload: {
           status: "online",
           error: null,
-          version: result.version,
+          version: null,
           lastCheckedAt: Date.now(),
         },
       });
-      dispatch({ type: "setBanner", payload: "Backend connection established." });
+      dispatch({ type: "setBanner", payload: "Provider connection established ✓" });
     } catch (error) {
       dispatch({
         type: "setConnection",
@@ -274,8 +319,51 @@ export function AppProvider({ children }: PropsWithChildren) {
     dispatch({ type: "updateDocumentHtml", payload: { documentId: selectedDocument.id, html } });
   }
 
+  async function exportDocument() {
+    if (!selectedDocument || selectedDocument.status !== "ready") {
+      return;
+    }
+
+    if (!state.settings.apiBaseUrl.trim()) {
+      dispatch({ type: "setBanner", payload: "Set the backend URL to export as DOCX." });
+      dispatch({ type: "setActiveSidebarView", payload: "connect" });
+      return;
+    }
+
+    try {
+      dispatch({ type: "setBanner", payload: `Exporting ${selectedDocument.name}…` });
+      const blob = await exportDocumentToDocx({
+        settings: state.settings,
+        html: selectedDocument.html,
+        backendDocId: selectedDocument.backendDocId,
+        filename: selectedDocument.name,
+      });
+
+      const url = URL.createObjectURL(blob);
+      const anchor = window.document.createElement("a");
+      anchor.href = url;
+      const baseName = selectedDocument.name.replace(/\.(html?|md|markdown|txt)$/i, "");
+      anchor.download = baseName.endsWith(".docx") ? baseName : `${baseName}.docx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+
+      dispatch({ type: "setBanner", payload: `${selectedDocument.name} exported.` });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Export failed: ${getErrorMessage(error)}` });
+    }
+  }
+
   function clearBanner() {
     dispatch({ type: "setBanner", payload: null });
+  }
+
+  function clearChat() {
+    if (!selectedDocument) {
+      return;
+    }
+
+    dispatch({ type: "clearMessages", payload: selectedDocument.id });
+    dispatch({ type: "setComposer", payload: "" });
   }
 
   return (
@@ -296,7 +384,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         acceptPendingChanges,
         discardPendingChanges,
         updateSelectedDocumentHtml,
+        exportDocument,
         clearBanner,
+        clearChat,
       }}
     >
       {children}

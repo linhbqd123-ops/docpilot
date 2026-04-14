@@ -51,7 +51,7 @@ export function LibraryPanel() {
         </div>
       </div>
 
-      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4">
         {state.documents.length === 0 ? (
           <div className="panel-card flex flex-col items-start gap-3 p-4 text-sm text-docpilot-muted">
             <FolderOpen size={18} className="text-docpilot-accent" />
@@ -77,15 +77,19 @@ export function LibraryPanel() {
                 <div className="flex items-start justify-between gap-3">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 text-left"
+                    className="min-w-0 flex-1 overflow-hidden text-left"
                     onClick={() => selectDocument(document.id)}
                   >
-                    <p className="truncate font-medium text-docpilot-textStrong">{document.name}</p>
-                    <p className="mt-1 text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                    <p className="block line-clamp-1 font-medium text-docpilot-textStrong">{document.name}</p>
+                    <p className="mt-1 line-clamp-1 text-xs uppercase tracking-[0.18em] text-docpilot-muted">
                       {document.kind} • {formatBytes(document.size)}
                     </p>
                   </button>
-                  <button type="button" className="action-button px-2.5 py-2" onClick={() => removeDocument(document.id)}>
+                  <button
+                    type="button"
+                    className="action-button shrink-0 px-2.5 py-2"
+                    onClick={() => removeDocument(document.id)}
+                  >
                     <Trash2 size={14} />
                   </button>
                 </div>
@@ -96,7 +100,9 @@ export function LibraryPanel() {
                   <span>updated {formatRelativeTime(document.updatedAt)}</span>
                 </div>
 
-                {document.error ? <p className="mt-3 text-sm text-docpilot-dangerText">{document.error}</p> : null}
+                {document.status === "error" && document.error ? (
+                  <p className="mt-3 text-sm text-docpilot-dangerText">{document.error}</p>
+                ) : null}
               </article>
             );
           })}

@@ -11,7 +11,10 @@ class ApiError extends Error {
 }
 
 function joinUrl(baseUrl: string, path: string) {
-  return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
+  const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  // Remove leading slash to make path relative to base
+  const p = path.startsWith("/") ? path.slice(1) : path;
+  return new URL(p, base).toString();
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, signal?: AbortSignal) {
@@ -51,6 +54,35 @@ export async function checkBackendHealth(baseUrl: string, timeoutMs: number) {
   }
 
   throw new ApiError("Unable to reach the backend health endpoint.");
+}
+
+export async function checkProviderConnection(providerUrl: string, timeoutMs: number) {
+  /**
+   * Test connection to provider API endpoint.
+   * Simply verify the provider domain is reachable by making a HEAD request to root.
+   */
+  try {
+    // Extract base domain from provider URL
+    // e.g., "https://api.groq.com/openai/v1" → "https://api.groq.com"
+    const url = new URL(providerUrl);
+    const baseUrl = `${url.protocol}//${url.host}`;
+
+    const response = await fetchWithTimeout(baseUrl + "/", { method: "GET" }, timeoutMs);
+
+    // Accept any 2xx or 3xx response as success
+    if (response.ok || response.status < 400) {
+      return {
+        status: "ok",
+        version: null,
+      };
+    }
+
+    throw new ApiError(`Provider returned status ${response.status}`);
+  } catch (error) {
+    throw new ApiError(
+      `Unable to reach provider endpoint: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 async function readEventStream(
@@ -145,6 +177,8 @@ export async function sendPromptToBackend(args: {
       },
       body: JSON.stringify({
         provider: settings.provider,
+        model: settings.modelOverride.trim() || undefined,
+        streaming: settings.streaming,
         prompt,
         document: {
           id: document.id,
@@ -180,6 +214,56 @@ export async function sendPromptToBackend(args: {
   };
 }
 
+export async function importDocumentFromBackend(args: {
+  settings: AppSettings;
+  file: File;
+  signal?: AbortSignal;
+}): Promise<{ docId: string; html: string; wordCount: number; pageCount: number }> {
+  const { settings, file, signal } = args;
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetchWithTimeout(
+    joinUrl(settings.apiBaseUrl, "/api/documents/import"),
+    { method: "POST", body: formData },
+    settings.requestTimeoutMs,
+    signal,
+  );
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new ApiError(bodyText || "Failed to import document.", response.status);
+  }
+
+  return response.json() as Promise<{ docId: string; html: string; wordCount: number; pageCount: number }>;
+}
+
+export async function exportDocumentToDocx(args: {
+  settings: AppSettings;
+  html: string;
+  backendDocId?: string;
+  filename: string;
+}): Promise<Blob> {
+  const { settings, html, backendDocId, filename } = args;
+
+  const response = await fetchWithTimeout(
+    joinUrl(settings.apiBaseUrl, "/api/documents/export"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html, doc_id: backendDocId ?? null, filename }),
+    },
+    settings.requestTimeoutMs,
+  );
+
+  if (!response.ok) {
+    const bodyText = await response.text();
+    throw new ApiError(bodyText || "Export failed.", response.status);
+  }
+
+  return response.blob();
+}
+
 export function getErrorMessage(error: unknown) {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "Request cancelled.";
@@ -190,4 +274,55 @@ export function getErrorMessage(error: unknown) {
   }
 
   return "Unknown error.";
+}
+
+// Simple HTTP client for general API calls (used by key management, etc.)
+export class HTTPClient {
+  constructor(private baseUrl: string) { }
+
+  async get<T>(path: string): Promise<{ data: T }> {
+    const response = await fetch(joinUrl(this.baseUrl, path), {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new ApiError(error || "Request failed", response.status);
+    }
+
+    const data = (await response.json()) as T;
+    return { data };
+  }
+
+  async post<T>(path: string, body: unknown): Promise<{ data: T }> {
+    const response = await fetch(joinUrl(this.baseUrl, path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new ApiError(error || "Request failed", response.status);
+    }
+
+    const data = (await response.json()) as T;
+    return { data };
+  }
+
+  async delete<T>(path: string): Promise<{ data: T }> {
+    const response = await fetch(joinUrl(this.baseUrl, path), {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new ApiError(error || "Request failed", response.status);
+    }
+
+    const data = (await response.json()) as T;
+    return { data };
+  }
 }

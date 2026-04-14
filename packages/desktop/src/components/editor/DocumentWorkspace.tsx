@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Eye, FileCog, PenSquare, RefreshCw, Sparkles, Undo2, X } from "lucide-react";
+import { Check, Download, Eye, FileCog, PenSquare, RefreshCw, Sparkles, Undo2, X } from "lucide-react";
 
 import { useAppContext } from "@/app/context";
 import { DocumentCanvas } from "@/components/editor/DocumentCanvas";
@@ -11,6 +11,7 @@ export function DocumentWorkspace() {
     updateSelectedDocumentHtml,
     acceptPendingChanges,
     discardPendingChanges,
+    exportDocument,
   } = useAppContext();
   const [previewPending, setPreviewPending] = useState(false);
 
@@ -87,6 +88,11 @@ export function DocumentWorkspace() {
                 <Sparkles size={14} /> Waiting for backend revision
               </button>
             )}
+            {selectedDocument.status === "ready" ? (
+              <button type="button" className="action-button" onClick={() => void exportDocument()}>
+                <Download size={14} /> Export DOCX
+              </button>
+            ) : null}
           </div>
         </div>
       </div>

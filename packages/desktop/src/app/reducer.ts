@@ -3,8 +3,10 @@ import { DEFAULT_THEME, isThemeMode } from "@/app/themes";
 import { commitPendingDocument, discardPendingDocument, stageDocumentHtml, updateDocumentHtml } from "@/lib/document";
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  apiBaseUrl: import.meta.env.VITE_DOCPILOT_API_BASE_URL ?? "",
+  apiBaseUrl: "http://localhost:8000", // Backend server - FIXED, not user-configurable
+  providerEndpoint: "", // Provider API endpoint - user-configurable
   provider: (import.meta.env.VITE_DOCPILOT_PROVIDER as AppSettings["provider"] | undefined) ?? "ollama",
+  modelOverride: "",
   requestTimeoutMs: 30_000,
   streaming: true,
   connectOnStartup: false,
@@ -28,6 +30,8 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
     settings: {
       ...DEFAULT_SETTINGS,
       ...persisted.settings,
+      // CRITICAL: apiBaseUrl must ALWAYS be the backend server, never user-configurable
+      apiBaseUrl: DEFAULT_SETTINGS.apiBaseUrl,
       theme: persistedTheme && isThemeMode(persistedTheme) ? persistedTheme : DEFAULT_SETTINGS.theme,
     },
     activeSidebarView: persisted.activeSidebarView ?? "library",
@@ -50,6 +54,7 @@ type Action =
   | { type: "setIsSending"; payload: boolean }
   | { type: "addMessage"; payload: { documentId: string; message: ChatMessage } }
   | { type: "updateMessage"; payload: { documentId: string; messageId: string; patch: Partial<ChatMessage> } }
+  | { type: "clearMessages"; payload: string }
   | { type: "stageDocument"; payload: { documentId: string; html: string } }
   | { type: "acceptPending"; payload: { documentId: string } }
   | { type: "discardPending"; payload: { documentId: string } }
@@ -157,7 +162,15 @@ export function appReducer(state: AppState, action: Action): AppState {
       };
     }
 
-    case "stageDocument":
+    case "clearMessages": {
+      const messageThreads = { ...state.messageThreads };
+      messageThreads[action.payload] = [];
+
+      return {
+        ...state,
+        messageThreads,
+      };
+    }
       return {
         ...state,
         documents: state.documents.map((document) =>

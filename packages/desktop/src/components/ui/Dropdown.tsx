@@ -34,12 +34,20 @@ export default function Dropdown({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
+      const target = e.target as Node | null;
+
+      if (!rootRef.current) return;
+
+      // If click was inside the root (button) or inside the portal menu, do nothing.
+      if (target && (rootRef.current.contains(target) || menuRef.current?.contains(target))) {
+        return;
       }
+
+      setOpen(false);
     }
 
     document.addEventListener("mousedown", onDocClick);
@@ -147,47 +155,48 @@ export default function Dropdown({
 
       {open && menuStyle
         ? createPortal(
-            <div
-              role="listbox"
-              aria-activedescendant={focusedIndex >= 0 ? `option-${focusedIndex}` : undefined}
-              style={menuStyle}
-              className={cn(
-                "scrollbar-thin max-h-64 overflow-auto rounded-xl border border-docpilot-border bg-docpilot-panel py-1 shadow-lg",
-                menuClassName,
-              )}
-            >
-              {items.map((item, idx) => {
-                const isSelected = item.value === value;
-                const isFocused = idx === focusedIndex;
+          <div
+            ref={menuRef}
+            role="listbox"
+            aria-activedescendant={focusedIndex >= 0 ? `option-${focusedIndex}` : undefined}
+            style={menuStyle}
+            className={cn(
+              "scrollbar-thin max-h-64 overflow-auto rounded-xl border border-docpilot-border bg-docpilot-panel py-1 shadow-lg",
+              menuClassName,
+            )}
+          >
+            {items.map((item, idx) => {
+              const isSelected = item.value === value;
+              const isFocused = idx === focusedIndex;
 
-                return (
-                  <div
-                    id={`option-${idx}`}
-                    key={item.value}
-                    role="option"
-                    aria-selected={isSelected}
-                    className={cn(
-                      "flex cursor-pointer items-start gap-3 px-3 py-2 text-sm",
-                      isSelected
-                        ? "bg-docpilot-accentSoft text-docpilot-textStrong"
-                        : isFocused
+              return (
+                <div
+                  id={`option-${idx}`}
+                  key={item.value}
+                  role="option"
+                  aria-selected={isSelected}
+                  className={cn(
+                    "flex cursor-pointer items-start gap-3 px-3 py-2 text-sm",
+                    isSelected
+                      ? "bg-docpilot-accentSoft text-docpilot-textStrong"
+                      : isFocused
                         ? "bg-docpilot-hover text-docpilot-textStrong"
                         : "text-docpilot-text hover:bg-docpilot-hover",
-                    )}
-                    onMouseEnter={() => setFocusedIndex(idx)}
-                    onClick={() => select(item)}
-                  >
-                    {item.icon ? <div className="mt-0.5">{item.icon}</div> : null}
-                    <div className="min-w-0">
-                      <div className="truncate font-medium">{item.label}</div>
-                      {item.description ? <div className="text-xs text-docpilot-muted">{item.description}</div> : null}
-                    </div>
+                  )}
+                  onMouseEnter={() => setFocusedIndex(idx)}
+                  onClick={() => select(item)}
+                >
+                  {item.icon ? <div className="mt-0.5">{item.icon}</div> : null}
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{item.label}</div>
+                    {item.description ? <div className="text-xs text-docpilot-muted">{item.description}</div> : null}
                   </div>
-                );
-              })}
-            </div>,
-            document.body,
-          )
+                </div>
+              );
+            })}
+          </div>,
+          document.body,
+        )
         : null}
     </div>
   );

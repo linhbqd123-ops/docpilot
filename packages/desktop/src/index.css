@@ -185,7 +185,7 @@
   }
 
   .badge {
-    @apply inline-flex items-center gap-1 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-2 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted;
+    @apply inline-flex items-center gap-1 rounded-full border border-docpilot-border bg-docpilot-panelAlt pl-[0.8rem] pr-2 py-1 text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted;
   }
 
   .theme-card {

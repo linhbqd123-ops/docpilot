@@ -27,7 +27,12 @@ export function savePersistedState(state: AppState) {
     documents: state.documents,
     selectedDocumentId: state.selectedDocumentId,
     messageThreads: state.messageThreads,
-    settings: state.settings,
+    settings: {
+      ...state.settings,
+      // CRITICAL: Never persist apiBaseUrl - it must always come from DEFAULT_SETTINGS
+      // This prevents accidentally saving a provider endpoint value as apiBaseUrl
+      apiBaseUrl: "http://localhost:8000",
+    },
     activeSidebarView: state.activeSidebarView,
   };
 
