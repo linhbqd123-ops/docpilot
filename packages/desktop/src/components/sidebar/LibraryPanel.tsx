@@ -47,7 +47,7 @@ export function LibraryPanel() {
           <div className="mb-2 flex items-center gap-2 text-docpilot-textStrong">
             <FilePlus2 size={16} /> Drag files here or use the import button
           </div>
-          <p>Preview is native for HTML, Markdown, and TXT. DOCX and PDF stay in the library until the backend import endpoint is available.</p>
+          <p>HTML, Markdown, and TXT open locally. DOCX imports attach a canonical session for review/apply/rollback. PDFs import as HTML projections without revision history.</p>
         </div>
       </div>
 
@@ -96,7 +96,9 @@ export function LibraryPanel() {
 
                 <div className="mt-3 flex flex-wrap gap-2 text-xs text-docpilot-muted">
                   <span className="badge">{document.status === "ready" ? "ready" : "backend import"}</span>
-                  {document.pendingHtml ? <span className="badge">review staged</span> : null}
+                  {document.documentSessionId ? <span className="badge">session-backed</span> : null}
+                  {document.pendingRevisionId ? <span className="badge">review staged</span> : null}
+                  {document.revisionStatus ? <span className="badge">{document.revisionStatus.toLowerCase()}</span> : null}
                   <span>updated {formatRelativeTime(document.updatedAt)}</span>
                 </div>
 

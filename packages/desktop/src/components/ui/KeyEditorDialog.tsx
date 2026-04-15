@@ -3,7 +3,6 @@ import { useState } from "react";
 import { MaskedKeyInput } from "./MaskedKeyInput";
 
 interface KeyEditorDialogProps {
-    provider: string;
     label: string;
     currentMaskedKey: string | null;
     isOpen: boolean;
@@ -15,7 +14,6 @@ interface KeyEditorDialogProps {
 }
 
 export function KeyEditorDialog({
-    provider,
     label,
     currentMaskedKey,
     isOpen,

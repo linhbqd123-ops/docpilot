@@ -20,6 +20,9 @@ import io.docpilot.mcp.model.patch.PatchValidation;
 import io.docpilot.mcp.model.revision.Revision;
 import io.docpilot.mcp.model.revision.RevisionStatus;
 import io.docpilot.mcp.model.session.DocumentSession;
+import io.docpilot.mcp.personalization.DocumentTextSupport;
+import io.docpilot.mcp.personalization.SemanticSearchMatch;
+import io.docpilot.mcp.personalization.SemanticSearchService;
 import io.docpilot.mcp.store.DocumentSessionStore;
 import io.docpilot.mcp.store.RevisionStore;
 import lombok.RequiredArgsConstructor;
@@ -27,7 +30,10 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -45,6 +51,7 @@ public class AiFacingToolHandler {
     private final RevisionService revisionService;
     private final DiffService diffService;
     private final HtmlProjectionService htmlProjectionService;
+    private final SemanticSearchService semanticSearchService;
 
     public List<ToolDefinition> definitions() {
         return List.of(
@@ -77,15 +84,19 @@ public class AiFacingToolHandler {
                 out.put("word_count", s.getWordCount());
                 out.put("paragraph_count", s.getParagraphCount());
                 out.put("question", question);
+                out.put("semantic_search_enabled", semanticSearchService.isEnabled());
+                out.put("retrieval_provider", semanticSearchService.providerName());
 
                 // Heading outline for navigation
                 ArrayNode headings = out.putArray("headings");
                 collectHeadingsToArray(s.getRoot(), headings);
 
-                // Keyword-based snippet extraction
-                String[] keywords = question.toLowerCase().split("\\s+");
                 ArrayNode snippets = out.putArray("relevant_snippets");
-                collectSnippets(s.getRoot(), keywords, snippets, 0, new int[]{0});
+                Set<String> seenBlockIds = new LinkedHashSet<>();
+                appendSemanticSnippets(s, question, snippets, seenBlockIds, 8);
+
+                String[] keywords = question.toLowerCase(Locale.ROOT).split("\\s+");
+                collectSnippets(s.getRoot(), keywords, snippets, seenBlockIds, new int[]{snippets.size()});
 
                 return out;
             },
@@ -99,21 +110,26 @@ public class AiFacingToolHandler {
             ObjectNode e = objectMapper.createObjectNode();
             e.put("block_id", node.getId());
             e.put("level", node.getLayoutProps() != null ? node.getLayoutProps().getHeadingLevel() : 0);
-            e.put("text", extractText(node));
+            e.put("text", DocumentTextSupport.extractText(node));
             out.add(e);
         }
         if (node.getChildren() != null) node.getChildren().forEach(c -> collectHeadingsToArray(c, out));
     }
 
-    private void collectSnippets(DocumentComponent node, String[] keywords, ArrayNode out, int depth, int[] count) {
+    private void collectSnippets(DocumentComponent node, String[] keywords, ArrayNode out, Set<String> seenBlockIds, int[] count) {
         if (count[0] >= 20 || node == null) return;
-        String text = extractText(node).toLowerCase();
+        String text = DocumentTextSupport.extractText(node);
+        String lowerText = text.toLowerCase(Locale.ROOT);
         for (String kw : keywords) {
-            if (!kw.isBlank() && text.contains(kw)) {
+            if (!kw.isBlank() && lowerText.contains(kw) && seenBlockIds.add(node.getId())) {
                 ObjectNode snippet = objectMapper.createObjectNode();
                 snippet.put("block_id", node.getId());
                 snippet.put("type", node.getType().name());
-                snippet.put("text", extractText(node));
+                snippet.put("text", text);
+                if (node.getAnchor() != null && node.getAnchor().getLogicalPath() != null) {
+                    snippet.put("logical_path", node.getAnchor().getLogicalPath());
+                }
+                snippet.put("source", "keyword");
                 out.add(snippet);
                 count[0]++;
                 break;
@@ -121,8 +137,31 @@ public class AiFacingToolHandler {
         }
         if (node.getChildren() != null) {
             for (DocumentComponent child : node.getChildren()) {
-                collectSnippets(child, keywords, out, depth + 1, count);
+                collectSnippets(child, keywords, out, seenBlockIds, count);
             }
+        }
+    }
+
+    private void appendSemanticSnippets(
+        DocumentSession session,
+        String query,
+        ArrayNode out,
+        Set<String> seenBlockIds,
+        int limit
+    ) {
+        for (SemanticSearchMatch match : semanticSearchService.search(session, query, limit)) {
+            if (!seenBlockIds.add(match.blockId())) {
+                continue;
+            }
+            ObjectNode snippet = objectMapper.createObjectNode();
+            snippet.put("block_id", match.blockId());
+            snippet.put("type", match.type());
+            snippet.put("text", match.text());
+            snippet.put("logical_path", match.logicalPath());
+            snippet.put("heading_path", match.headingPath());
+            snippet.put("score", match.score());
+            snippet.put("source", "semantic");
+            out.add(snippet);
         }
     }
 
@@ -137,13 +176,17 @@ public class AiFacingToolHandler {
             schema,
             params -> {
                 DocumentSession s = requireSession(params);
-                String query = params.path("query").asText().toLowerCase();
+                String rawQuery = params.path("query").asText();
+                String query = rawQuery.toLowerCase(Locale.ROOT);
 
                 ArrayNode results = objectMapper.createArrayNode();
-                searchContext(s.getRoot(), query, results, new int[]{0});
+                Set<String> seenBlockIds = new LinkedHashSet<>();
+                appendSemanticContextMatches(s, rawQuery, results, seenBlockIds, 12);
+                searchContext(s.getRoot(), query, results, seenBlockIds, new int[]{results.size()});
 
                 ObjectNode out = objectMapper.createObjectNode();
-                out.put("query", params.path("query").asText());
+                out.put("query", rawQuery);
+                out.put("retrieval_provider", semanticSearchService.providerName());
                 out.put("match_count", results.size());
                 out.set("matches", results);
                 return out;
@@ -152,11 +195,12 @@ public class AiFacingToolHandler {
         );
     }
 
-    private void searchContext(DocumentComponent node, String query, ArrayNode results, int[] count) {
+    private void searchContext(DocumentComponent node, String query, ArrayNode results, Set<String> seenBlockIds, int[] count) {
         if (count[0] >= 30 || node == null) return;
-        String text = extractText(node);
-        if (text.toLowerCase().contains(query)) {
-            int offset = text.toLowerCase().indexOf(query);
+        String text = DocumentTextSupport.extractText(node);
+        String lowerText = text.toLowerCase(Locale.ROOT);
+        if (lowerText.contains(query) && seenBlockIds.add(node.getId())) {
+            int offset = lowerText.indexOf(query);
             ObjectNode match = objectMapper.createObjectNode();
             match.put("block_id", node.getId());
             match.put("type", node.getType().name());
@@ -166,13 +210,42 @@ public class AiFacingToolHandler {
             if (node.getAnchor() != null) {
                 match.put("logical_path", node.getAnchor().getLogicalPath());
             }
+            match.put("source", "keyword");
             results.add(match);
             count[0]++;
         }
         if (node.getChildren() != null) {
             for (DocumentComponent child : node.getChildren()) {
-                searchContext(child, query, results, count);
+                searchContext(child, query, results, seenBlockIds, count);
             }
+        }
+    }
+
+    private void appendSemanticContextMatches(
+        DocumentSession session,
+        String query,
+        ArrayNode results,
+        Set<String> seenBlockIds,
+        int limit
+    ) {
+        String lowerQuery = query.toLowerCase(Locale.ROOT);
+        for (SemanticSearchMatch match : semanticSearchService.search(session, query, limit)) {
+            if (!seenBlockIds.add(match.blockId())) {
+                continue;
+            }
+            String lowerText = match.text().toLowerCase(Locale.ROOT);
+            int offset = lowerText.indexOf(lowerQuery);
+            ObjectNode result = objectMapper.createObjectNode();
+            result.put("block_id", match.blockId());
+            result.put("type", match.type());
+            result.put("text", match.text());
+            result.put("match_offset", offset);
+            result.put("match_length", offset >= 0 ? query.length() : 0);
+            result.put("logical_path", match.logicalPath());
+            result.put("heading_path", match.headingPath());
+            result.put("score", match.score());
+            result.put("source", "semantic");
+            results.add(result);
         }
     }
 
@@ -183,6 +256,7 @@ public class AiFacingToolHandler {
         schema.put("type", "object");
         ObjectNode props = schema.putObject("properties");
         props.putObject("session_id").put("type", "string");
+        props.putObject("base_revision_id").put("type", "string").put("description", "Revision the author was looking at when composing the edit. Defaults to the current session revision.");
         props.putObject("operations").put("type", "array")
             .put("description", "List of patch operations. Each is an object with: op, target (block_id, start?, end?, table_id?, cell_logical_address?), value (text, style_id, etc.)");
         props.putObject("summary").put("type", "string").put("description", "Human-readable summary of the edit");
@@ -195,6 +269,7 @@ public class AiFacingToolHandler {
             schema,
             params -> {
                 DocumentSession s = requireSession(params);
+                String baseRevisionId = params.path("base_revision_id").asText(null);
                 String summary = params.path("summary").asText();
                 String author = params.path("author").asText("agent");
 
@@ -208,7 +283,7 @@ public class AiFacingToolHandler {
                 Patch draft = Patch.builder()
                     .patchId(UUID.randomUUID().toString())
                     .sessionId(s.getSessionId())
-                    .baseRevisionId(s.getCurrentRevisionId())
+                    .baseRevisionId(baseRevisionId != null && !baseRevisionId.isBlank() ? baseRevisionId : s.getCurrentRevisionId())
                     .operations(ops)
                     .summary(summary)
                     .workingSet(workingSet)
@@ -221,7 +296,7 @@ public class AiFacingToolHandler {
                 Patch patch = Patch.builder()
                     .patchId(draft.getPatchId())
                     .sessionId(s.getSessionId())
-                    .baseRevisionId(s.getCurrentRevisionId())
+                    .baseRevisionId(draft.getBaseRevisionId())
                     .operations(ops)
                     .summary(summary)
                     .validation(validation)
@@ -261,12 +336,12 @@ public class AiFacingToolHandler {
             PatchTarget target = PatchTarget.builder()
                 .blockId(targetNode.path("block_id").asText(null))
                 .runId(targetNode.path("run_id").asText(null))
-                .start(targetNode.path("start").asInt(0))
-                .end(targetNode.path("end").asInt(0))
+                .start(targetNode.hasNonNull("start") ? targetNode.get("start").asInt() : null)
+                .end(targetNode.hasNonNull("end") ? targetNode.get("end").asInt() : null)
                 .tableId(targetNode.path("table_id").asText(null))
                 .rowId(targetNode.path("row_id").asText(null))
-                .cellId(targetNode.path("cell_id").asText(null))
-                .cellLogicalAddress(targetNode.path("cell_logical_address").asText(null))
+                .cellId(targetNode.path("cell_id").asText(targetNode.path("cellId").asText(null)))
+                .cellLogicalAddress(targetNode.path("cell_logical_address").asText(targetNode.path("cellLogicalAddress").asText(null)))
                 .build();
             ops.add(PatchOperation.builder()
                 .op(opType)
@@ -389,10 +464,21 @@ public class AiFacingToolHandler {
                 String baseId = params.path("base_revision_id").asText();
                 String targetId = params.path("target_revision_id").asText();
 
-                // For a full implementation, we would load snapshot trees; here we compute
-                // diff on the current session state as an approximation (accurate when
-                // target == currentRevisionId).
-                DocumentDiff diff = diffService.compute(s.getRoot(), s.getRoot(), baseId, targetId, s.getSessionId());
+                var baseTree = (baseId == null || baseId.isBlank())
+                    ? revisionStore.findInitialSnapshot(s.getSessionId())
+                    : revisionStore.findSnapshot(s.getSessionId(), baseId);
+                var targetTree = targetId.equals(s.getCurrentRevisionId())
+                    ? java.util.Optional.of(s.getRoot())
+                    : revisionStore.findSnapshot(s.getSessionId(), targetId);
+
+                if (baseTree.isEmpty()) {
+                    throw new IllegalArgumentException("Base revision snapshot not found: " + baseId);
+                }
+                if (targetTree.isEmpty()) {
+                    throw new IllegalArgumentException("Target revision snapshot not found: " + targetId);
+                }
+
+                DocumentDiff diff = diffService.compute(baseTree.get(), targetTree.get(), baseId, targetId, s.getSessionId());
 
                 ObjectNode out = objectMapper.createObjectNode();
                 out.put("base_revision_id", baseId);
@@ -429,7 +515,7 @@ public class AiFacingToolHandler {
 
         return new ToolDefinition(
             "export_current_document",
-            "Signals that the current session is ready to export. Returns export metadata and a download URL path. The actual DOCX bytes are available via GET /api/sessions/{id}/export-docx.",
+            "Signals that the current session is ready to export. Returns export metadata and a download URL path. The actual DOCX bytes are available via POST /api/sessions/{id}/export-docx.",
             schema,
             params -> {
                 DocumentSession s = requireSession(params);
@@ -450,20 +536,6 @@ public class AiFacingToolHandler {
     private DocumentSession requireSession(JsonNode params) {
         String sid = params.path("session_id").asText();
         return sessionStore.find(sid).orElseThrow(() -> new IllegalArgumentException("Session not found: " + sid));
-    }
-
-    private String extractText(DocumentComponent node) {
-        if (node == null) return "";
-        StringBuilder sb = new StringBuilder();
-        if (node.getContentProps() != null && node.getContentProps().getText() != null) {
-            sb.append(node.getContentProps().getText());
-        }
-        if (node.getChildren() != null) {
-            for (DocumentComponent child : node.getChildren()) {
-                sb.append(extractText(child));
-            }
-        }
-        return sb.toString().strip();
     }
 
     private ObjectNode sessionWithField(String fieldName, String description, boolean required) {

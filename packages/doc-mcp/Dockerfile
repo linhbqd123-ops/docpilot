@@ -25,7 +25,7 @@ USER docpilot
 
 COPY --from=builder /build/target/*.jar app.jar
 
-RUN mkdir -p /app/data/uploads /app/data/registries /app/data/sessions /app/data/revisions /app/logs
+RUN mkdir -p /app/data/uploads /app/data/registries /app/data/sessions /app/data/revisions /app/data/sqlite /app/data/legacy-archive /app/logs
 
 EXPOSE 8080
 
@@ -33,6 +33,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
   CMD wget -qO- http://localhost:8080/actuator/health | grep -q '"status":"UP"' || exit 1
 
 ENTRYPOINT ["java", \
+  "--enable-native-access=ALL-UNNAMED", \
   "--add-opens", "java.base/java.lang=ALL-UNNAMED", \
   "--add-opens", "java.base/java.lang.reflect=ALL-UNNAMED", \
   "--add-opens", "java.base/java.util=ALL-UNNAMED", \

@@ -1,6 +1,7 @@
-from typing import Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pathlib import Path
 
 from crypto import decrypt_key
 
@@ -38,8 +39,12 @@ class Settings(BaseSettings):
         
         return v
 
-    # Internal Java doc-processor
-    doc_processor_url: str = "http://localhost:8080"
+    # Internal Java document service
+    doc_mcp_url: str = "http://localhost:8080"
+
+    # Chat persistence
+    chat_database_path: str = str(Path(__file__).resolve().parent / "data" / "docpilot.db")
+    legacy_chats_path: str = str(Path(__file__).resolve().parent / "data" / "chats.json")
 
     # ── Ollama ──────────────────────────────────────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
@@ -83,7 +88,6 @@ class Settings(BaseSettings):
     custom_default_model: str = ""
 
     # ── Processing limits ───────────────────────────────────────────────────
-    max_document_html_chars: int = 120_000
     request_timeout_seconds: int = 120
 
 

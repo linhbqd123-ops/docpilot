@@ -14,6 +14,78 @@ export interface OutlineItem {
   level: number;
 }
 
+export interface RevisionValidation {
+  structureOk: boolean;
+  styleOk: boolean;
+  scope: string;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface ReviewOperation {
+  op: string;
+  description: string;
+  blockId?: string | null;
+}
+
+export interface RevisionReview {
+  revisionId: string;
+  status: string;
+  summary: string;
+  author: string;
+  scope: string;
+  createdAt?: string | null;
+  operationCount: number;
+  validation?: RevisionValidation;
+  operations: ReviewOperation[];
+}
+
+export interface RevisionProposal {
+  revisionId: string;
+  status: string;
+  operationCount: number;
+  summary: string;
+  validation?: RevisionValidation;
+}
+
+export interface AgentNotice {
+  code?: string;
+  message?: string;
+  statusCode?: number;
+  items?: string[];
+}
+
+export interface ToolActivity {
+  event: string;
+  tool?: string;
+  [key: string]: unknown;
+}
+
+export interface SessionRevisionSummary {
+  revisionId: string;
+  baseRevisionId?: string | null;
+  status: string;
+  summary: string;
+  author?: string;
+  scope?: string;
+  createdAt?: string | null;
+  appliedAt?: string | null;
+}
+
+export interface SessionSummary {
+  sessionId: string;
+  docId?: string | null;
+  filename?: string;
+  state?: string | null;
+  currentRevisionId?: string | null;
+  wordCount: number;
+  paragraphCount?: number;
+  tableCount?: number;
+  imageCount?: number;
+  sectionCount?: number;
+  createdAt?: string | null;
+}
+
 export interface DocumentRecord {
   id: string;
   name: string;
@@ -26,12 +98,17 @@ export interface DocumentRecord {
   wordCount: number;
   createdAt: number;
   updatedAt: number;
-  /** docId assigned by the Java doc-processor; used for DOCX export to restore original styles. */
+  /** docId assigned by the canonical document service. */
   backendDocId?: string;
+  documentSessionId?: string;
+  baseRevisionId?: string | null;
+  currentRevisionId?: string | null;
+  pendingRevisionId?: string;
+  revisionStatus?: string | null;
+  sessionState?: string | null;
+  reviewPayload?: RevisionReview | null;
+  revisions: SessionRevisionSummary[];
   error?: string;
-  pendingHtml?: string;
-  pendingOutline?: OutlineItem[];
-  pendingWordCount?: number;
 }
 
 export interface ChatMessage {
@@ -53,9 +130,8 @@ export interface Chat {
 
 export interface AppSettings {
   apiBaseUrl: string;
-  providerEndpoint?: string;
   provider: "ollama" | "openai" | "groq" | "openrouter" | "together" | "zai" | "anthropic" | "azure" | "custom";
-  /** Optional model override — sent as the `model` field in /api/chat requests.
+  /** Optional model override — sent as the `model` field in /api/agent/turn requests.
    *  If empty, the backend uses its default model for the selected provider. */
   modelOverride: string;
   requestTimeoutMs: number;
@@ -88,8 +164,40 @@ export interface AppState extends PersistedState {
   banner: string | null;
 }
 
-export interface ChatResponse {
+export interface AgentTurnResponse {
+  chatId?: string;
   message: string;
-  documentHtml?: string;
-  notices?: string[];
+  mode: "ask" | "agent";
+  intent?: string | null;
+  resultType: "answer" | "clarify" | "revision_staged";
+  documentSessionId?: string | null;
+  baseRevisionId?: string | null;
+  revisionId?: string | null;
+  status: string;
+  proposal?: RevisionProposal | null;
+  review?: RevisionReview | null;
+  toolActivity: ToolActivity[];
+  notices: AgentNotice[];
+}
+
+export interface ImportedDocumentPayload {
+  docId?: string | null;
+  documentSessionId?: string | null;
+  baseRevisionId?: string | null;
+  html: string;
+  wordCount: number;
+  pageCount: number;
+  filename: string;
+}
+
+export interface SessionRefreshPayload {
+  documentSessionId: string;
+  html?: string;
+  session: SessionSummary;
+  revisions: SessionRevisionSummary[];
+  result?: {
+    revisionId?: string | null;
+    status?: string;
+    currentRevisionId?: string | null;
+  };
 }

@@ -1,111 +1,95 @@
 package io.docpilot.mcp.storage;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.docpilot.mcp.config.AppProperties;
-import io.docpilot.mcp.model.legacy.DocumentStructure;
 import io.docpilot.mcp.model.legacy.StyleRegistry;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Thread-safe store for {@link StyleRegistry} and {@link DocumentStructure}.
+ * Thread-safe store for {@link StyleRegistry} metadata.
  * Write-through to disk + L1 in-memory cache.
  */
 @Repository
-@RequiredArgsConstructor
 @Slf4j
 public class RegistryStore {
 
     private final AppProperties props;
     private final ObjectMapper objectMapper;
+    private final JdbcTemplate jdbcTemplate;
 
-    private final ConcurrentHashMap<String, StyleRegistry>    registryCache  = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, DocumentStructure> structureCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, StyleRegistry> registryCache = new ConcurrentHashMap<>();
+
+    public RegistryStore(AppProperties props, ObjectMapper objectMapper, JdbcTemplate jdbcTemplate) {
+        this.props = props;
+        this.objectMapper = objectMapper;
+        this.jdbcTemplate = jdbcTemplate;
+    }
 
     // ─── StyleRegistry ────────────────────────────────────────────────────────
 
     public void saveRegistry(StyleRegistry registry) {
         registryCache.put(registry.getDocId(), registry);
-        persist(registryPath(registry.getDocId()), registry);
+        jdbcTemplate.update(
+            """
+            INSERT INTO registries (doc_id, filename, extracted_at, payload_json, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                filename = excluded.filename,
+                extracted_at = excluded.extracted_at,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at
+            """,
+            registry.getDocId(),
+            registry.getFilename(),
+            registry.getExtractedAt() != null ? registry.getExtractedAt().toString() : null,
+            toJson(registry),
+            java.time.Instant.now().toString()
+        );
         log.debug("StyleRegistry saved: docId={}", registry.getDocId());
     }
 
     public Optional<StyleRegistry> findRegistry(String docId) {
         StyleRegistry cached = registryCache.get(docId);
-        if (cached != null) return Optional.of(cached);
-
-        Path file = registryPath(docId);
-        if (!Files.exists(file)) return Optional.empty();
-        try {
-            StyleRegistry loaded = objectMapper.readValue(file.toFile(), StyleRegistry.class);
-            registryCache.put(docId, loaded);
-            return Optional.of(loaded);
-        } catch (IOException e) {
-            log.warn("Cannot deserialize registry from {}: {}", file, e.getMessage());
-            return Optional.empty();
+        if (cached != null) {
+            return Optional.of(cached);
         }
+
+        return jdbcTemplate.query(
+            "SELECT payload_json FROM registries WHERE doc_id = ?",
+            rs -> {
+                if (!rs.next()) {
+                    return Optional.<StyleRegistry>empty();
+                }
+                try {
+                    StyleRegistry loaded = objectMapper.readValue(rs.getString("payload_json"), StyleRegistry.class);
+                    registryCache.put(docId, loaded);
+                    return Optional.of(loaded);
+                } catch (IOException e) {
+                    log.warn("Cannot deserialize registry {} from SQLite: {}", docId, e.getMessage());
+                    return Optional.<StyleRegistry>empty();
+                }
+            },
+            docId
+        );
     }
 
     public void deleteRegistry(String docId) {
         registryCache.remove(docId);
-        deleteSilently(registryPath(docId));
+        jdbcTemplate.update("DELETE FROM registries WHERE doc_id = ?", docId);
     }
 
-    // ─── DocumentStructure ───────────────────────────────────────────────────
-
-    public void saveStructure(DocumentStructure structure) {
-        structureCache.put(structure.getDocId(), structure);
-        persist(structurePath(structure.getDocId()), structure);
-        log.debug("DocumentStructure saved: docId={}", structure.getDocId());
-    }
-
-    public Optional<DocumentStructure> findStructure(String docId) {
-        DocumentStructure cached = structureCache.get(docId);
-        if (cached != null) return Optional.of(cached);
-
-        Path file = structurePath(docId);
-        if (!Files.exists(file)) return Optional.empty();
+    private String toJson(Object value) {
         try {
-            DocumentStructure loaded = objectMapper.readValue(file.toFile(), DocumentStructure.class);
-            structureCache.put(docId, loaded);
-            return Optional.of(loaded);
-        } catch (IOException e) {
-            log.warn("Cannot deserialize structure from {}: {}", file, e.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    // ─── internal ─────────────────────────────────────────────────────────────
-
-    private Path registryPath(String docId) {
-        return props.storage().registryPath().resolve(docId + ".registry.json");
-    }
-
-    private Path structurePath(String docId) {
-        return props.storage().registryPath().resolve(docId + ".structure.json");
-    }
-
-    private void persist(Path target, Object value) {
-        try {
-            Files.createDirectories(target.getParent());
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(target.toFile(), value);
-        } catch (IOException e) {
-            log.error("Failed to persist {} — in-memory cache still active: {}", target, e.getMessage());
-        }
-    }
-
-    private void deleteSilently(Path path) {
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException e) {
-            log.warn("Could not delete {}: {}", path, e.getMessage());
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialise registry payload", e);
         }
     }
 }

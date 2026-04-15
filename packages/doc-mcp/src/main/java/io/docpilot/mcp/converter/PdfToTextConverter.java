@@ -1,4 +1,4 @@
-﻿package io.docpilot.mcp.converter;
+package io.docpilot.mcp.converter;
 
 import io.docpilot.mcp.exception.ConversionException;
 import lombok.extern.slf4j.Slf4j;
@@ -13,7 +13,7 @@ import java.io.InputStream;
 /**
  * Extracts plain text from a PDF file using Apache PDFBox 2.x.
  *
- * <p>PDFBox is used instead of docx4j here â€” it is purpose-built for PDF
+ * <p>PDFBox is used instead of docx4j here — it is purpose-built for PDF
  * reading and handles encrypted, compressed, and image-heavy PDFs reliably.
  *
  * <p>For scanned / image-only PDFs, text extraction will be empty.
@@ -24,7 +24,7 @@ import java.io.InputStream;
 public class PdfToTextConverter {
 
     public Result convert(InputStream in, String filename) {
-        // PDFBox 3.x requires byte[] or File â€” read to memory first
+        // PDFBox 3.x requires byte[] or File — read to memory first
         byte[] pdfBytes;
         try {
             pdfBytes = in.readAllBytes();
@@ -43,7 +43,7 @@ public class PdfToTextConverter {
 
             int wordCount = text.isBlank() ? 0 : text.trim().split("\\s+").length;
 
-            log.info("PDFâ†’Text complete: filename={} pages={} words={}", filename, pageCount, wordCount);
+            log.info("PDF→Text complete: filename={} pages={} words={}", filename, pageCount, wordCount);
             return new Result(text, pageCount, wordCount,
                 info.getTitle(), info.getAuthor());
 

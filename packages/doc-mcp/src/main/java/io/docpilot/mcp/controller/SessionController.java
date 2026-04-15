@@ -3,8 +3,11 @@ package io.docpilot.mcp.controller;
 import io.docpilot.mcp.engine.importer.DocxImportService;
 import io.docpilot.mcp.engine.projection.HtmlProjectionService;
 import io.docpilot.mcp.exception.NotFoundException;
+import io.docpilot.mcp.model.revision.Revision;
 import io.docpilot.mcp.model.session.DocumentSession;
+import io.docpilot.mcp.personalization.SemanticSearchService;
 import io.docpilot.mcp.store.DocumentSessionStore;
+import io.docpilot.mcp.store.RevisionStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -33,6 +36,8 @@ public class SessionController {
     private final DocxImportService importService;
     private final HtmlProjectionService htmlProjectionService;
     private final DocumentSessionStore sessionStore;
+    private final RevisionStore revisionStore;
+    private final SemanticSearchService semanticSearchService;
 
     // ─── import ───────────────────────────────────────────────────────────────
 
@@ -51,7 +56,9 @@ public class SessionController {
 
         try (InputStream in = file.getInputStream()) {
             DocumentSession session = importService.importDocx(in, sessionId, docId, originalName);
+            semanticSearchService.reindexSession(session);
             sessionStore.save(session);
+            revisionStore.saveInitialSnapshot(sessionId, session.getRoot());
             // Save raw DOCX bytes for rollback support
             sessionStore.saveDocxSnapshot(sessionId, file.getBytes());
             log.info("Imported DOCX: filename={} sessionId={} wordCount={}", originalName, sessionId, session.getWordCount());
@@ -84,18 +91,18 @@ public class SessionController {
     public ResponseEntity<Map<String, Object>> getSummary(@PathVariable String id) {
         DocumentSession s = sessionStore.find(id)
             .orElseThrow(() -> new NotFoundException("Session not found: " + id));
-        return ResponseEntity.ok(Map.of(
-            "session_id", s.getSessionId(),
-            "doc_id", s.getDocId(),
-            "filename", s.getFilename(),
-            "state", s.getState().name(),
-            "current_revision_id", s.getCurrentRevisionId() != null ? s.getCurrentRevisionId() : "",
-            "word_count", s.getWordCount(),
-            "paragraph_count", s.getParagraphCount(),
-            "table_count", s.getTableCount(),
-            "image_count", s.getImageCount(),
-            "section_count", s.getSectionCount(),
-            "created_at", s.getCreatedAt() != null ? s.getCreatedAt().toString() : ""
+        return ResponseEntity.ok(Map.ofEntries(
+            Map.entry("session_id", s.getSessionId()),
+            Map.entry("doc_id", s.getDocId()),
+            Map.entry("filename", s.getFilename()),
+            Map.entry("state", s.getState().name()),
+            Map.entry("current_revision_id", s.getCurrentRevisionId() != null ? s.getCurrentRevisionId() : ""),
+            Map.entry("word_count", s.getWordCount()),
+            Map.entry("paragraph_count", s.getParagraphCount()),
+            Map.entry("table_count", s.getTableCount()),
+            Map.entry("image_count", s.getImageCount()),
+            Map.entry("section_count", s.getSectionCount()),
+            Map.entry("created_at", s.getCreatedAt() != null ? s.getCreatedAt().toString() : "")
         ));
     }
 
@@ -108,5 +115,31 @@ public class SessionController {
             .orElseThrow(() -> new NotFoundException("Session not found: " + id));
         String html = fragment ? htmlProjectionService.projectFragment(s) : htmlProjectionService.project(s);
         return ResponseEntity.ok(html);
+    }
+
+    @GetMapping("/{id}/revisions")
+    public ResponseEntity<java.util.List<Map<String, Object>>> listRevisions(@PathVariable String id,
+                                                                             @RequestParam(required = false) String status) {
+        sessionStore.find(id)
+            .orElseThrow(() -> new NotFoundException("Session not found: " + id));
+
+        java.util.List<Map<String, Object>> revisions = revisionStore.findBySession(id).stream()
+            .filter(revision -> status == null || status.isBlank() || revision.getStatus().name().equalsIgnoreCase(status))
+            .map(this::toRevisionSummary)
+            .toList();
+        return ResponseEntity.ok(revisions);
+    }
+
+    private Map<String, Object> toRevisionSummary(Revision revision) {
+        return Map.ofEntries(
+            Map.entry("revision_id", revision.getRevisionId()),
+            Map.entry("base_revision_id", revision.getBaseRevisionId() != null ? revision.getBaseRevisionId() : ""),
+            Map.entry("status", revision.getStatus().name()),
+            Map.entry("summary", revision.getSummary() != null ? revision.getSummary() : ""),
+            Map.entry("author", revision.getAuthor() != null ? revision.getAuthor() : ""),
+            Map.entry("scope", revision.getScope() != null ? revision.getScope() : ""),
+            Map.entry("created_at", revision.getCreatedAt() != null ? revision.getCreatedAt().toString() : ""),
+            Map.entry("applied_at", revision.getAppliedAt() != null ? revision.getAppliedAt().toString() : "")
+        );
     }
 }

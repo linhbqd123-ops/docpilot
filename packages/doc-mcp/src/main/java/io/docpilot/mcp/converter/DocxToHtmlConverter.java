@@ -1,4 +1,4 @@
-﻿package io.docpilot.mcp.converter;
+package io.docpilot.mcp.converter;
 
 import io.docpilot.mcp.exception.ConversionException;
 import io.docpilot.mcp.model.legacy.*;
@@ -46,7 +46,7 @@ public class DocxToHtmlConverter {
             StyleRegistry registry = extractRegistry(wmlPackage, docId, filename);
             int wordCount = countWords(wmlPackage);
 
-            log.info("DOCXâ†’HTML complete: docId={} filename={} words={}", docId, filename, wordCount);
+            log.info("DOCX→HTML complete: docId={} filename={} words={}", docId, filename, wordCount);
             return new Result(html, registry, wordCount);
 
         } catch (ConversionException ce) {
@@ -336,12 +336,12 @@ public class DocxToHtmlConverter {
     //  Unit conversion helpers
     // -----------------------------------------------------------------------
 
-    /** OOXML half-points (sz) â†’ points */
+    /** OOXML half-points (sz) → points */
     private double halfPointsToPt(BigInteger halfPoints) {
         return halfPoints.doubleValue() / 2.0;
     }
 
-    /** OOXML twentieths-of-a-point â†’ points */
+    /** OOXML twentieths-of-a-point → points */
     private double twentieathsToPoints(BigInteger twips) {
         return twips == null ? 0 : twips.doubleValue() / 20.0;
     }
@@ -358,7 +358,7 @@ public class DocxToHtmlConverter {
         return val.startsWith("#") ? val : "#" + val;
     }
 
-    /** BooleanDefaultTrue: null â†’ not set; isVal() returns true by default when val absent. */
+    /** BooleanDefaultTrue: null → not set; isVal() returns true by default when val absent. */
     private Boolean isEnabled(BooleanDefaultTrue flag) {
         if (flag == null) return null;
         return flag.isVal();

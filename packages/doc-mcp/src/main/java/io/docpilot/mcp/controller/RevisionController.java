@@ -46,7 +46,8 @@ public class RevisionController {
         return ResponseEntity.ok(Map.of(
             "revision_id", applied.getRevisionId(),
             "status", applied.getStatus().name(),
-            "applied_at", applied.getAppliedAt() != null ? applied.getAppliedAt().toString() : ""
+            "applied_at", applied.getAppliedAt() != null ? applied.getAppliedAt().toString() : "",
+            "current_revision_id", s.getCurrentRevisionId() != null ? s.getCurrentRevisionId() : ""
         ));
     }
 
@@ -70,7 +71,8 @@ public class RevisionController {
         Revision rolled = revisionService.rollback(id, s);
         return ResponseEntity.ok(Map.of(
             "revision_id", rolled.getRevisionId(),
-            "status", rolled.getStatus().name()
+            "status", rolled.getStatus().name(),
+            "current_revision_id", s.getCurrentRevisionId() != null ? s.getCurrentRevisionId() : ""
         ));
     }
 }

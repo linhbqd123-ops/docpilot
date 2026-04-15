@@ -56,8 +56,7 @@ public class ChangeToolHandler {
                     String sessionId = params.path("session_id").asText();
                     DocumentSession s = requireSession(params);
                     String snapshotId = "snap_" + UUID.randomUUID().toString().substring(0, 8);
-                    // Save session state snapshot
-                    sessionStore.save(s); // current state persisted
+                    revisionStore.saveSnapshot(sessionId, snapshotId, s.getRoot());
                     ObjectNode out = objectMapper.createObjectNode();
                     out.put("snapshotId", snapshotId);
                     out.put("sessionId",  sessionId);

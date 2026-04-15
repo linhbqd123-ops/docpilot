@@ -7,10 +7,32 @@ import {
   type PropsWithChildren,
 } from "react";
 
-import type { AppSettings, AppState, Chat, ChatMessage, DocumentRecord, SidebarView } from "@/app/types";
+import type {
+  AgentNotice,
+  AppSettings,
+  AppState,
+  Chat,
+  ChatMessage,
+  DocumentRecord,
+  SidebarView,
+} from "@/app/types";
 import { appReducer, createInitialState } from "@/app/reducer";
 import { getThemeDefinition } from "@/app/themes";
-import { checkBackendHealth, exportDocumentToDocx, getErrorMessage, importDocumentFromBackend, sendPromptToBackend, checkProviderConnection, loadChatsFromBackend, saveChat, updateChat, deleteChat as deleteChatApi } from "@/lib/api";
+import {
+  applyRevisionInBackend,
+  checkBackendHealth,
+  deleteChat as deleteChatApi,
+  exportDocumentToDocx,
+  getErrorMessage,
+  importDocumentFromBackend,
+  loadChatsFromBackend,
+  refreshSessionFromBackend,
+  rejectRevisionInBackend,
+  rollbackRevisionInBackend,
+  saveChat,
+  sendAgentTurnToBackend,
+  updateChat,
+} from "@/lib/api";
 import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
 import { loadPersistedState, savePersistedState } from "@/lib/storage";
 
@@ -27,8 +49,9 @@ interface AppContextValue {
   testConnection: () => Promise<void>;
   sendMessage: () => Promise<void>;
   cancelRequest: () => void;
-  acceptPendingChanges: () => void;
-  discardPendingChanges: () => void;
+  applyStagedRevision: () => Promise<void>;
+  rejectStagedRevision: () => Promise<void>;
+  rollbackCurrentRevision: () => Promise<void>;
   updateSelectedDocumentHtml: (html: string) => void;
   exportDocument: () => Promise<void>;
   clearBanner: () => void;
@@ -41,20 +64,42 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+function formatNotices(notices?: AgentNotice[]) {
+  if (!notices?.length) {
+    return "";
+  }
+
+  const parts: string[] = [];
+
+  notices.forEach((notice) => {
+    if (notice.message) {
+      parts.push(notice.message);
+    }
+    if (notice.items?.length) {
+      parts.push(notice.items.join(" "));
+    }
+  });
+
+  return parts.join(" ").trim();
+}
+
 export function AppProvider({ children }: PropsWithChildren) {
   const [state, dispatch] = useReducer(appReducer, loadPersistedState(), createInitialState);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  const selectedDocument =
-    state.documents.find((document) => document.id === state.selectedDocumentId) ?? null;
-
-  const currentMessages = selectedDocument
-    ? state.messageThreads[selectedDocument.id] ?? []
-    : [];
+  const selectedDocument = state.documents.find((document) => document.id === state.selectedDocumentId) ?? null;
+  const selectedChat = selectedDocument && state.selectedChatId
+    ? state.chats.find((chat) => chat.id === state.selectedChatId && chat.documentId === selectedDocument.id) ?? null
+    : null;
+  const currentMessages = selectedChat
+    ? state.messageThreads[selectedChat.id] ?? []
+    : selectedDocument
+      ? state.messageThreads[selectedDocument.id] ?? []
+      : [];
 
   useEffect(() => {
     savePersistedState(state);
-  }, [state.documents, state.selectedDocumentId, state.chats, state.selectedChatId, state.messageThreads, state.settings, state.activeSidebarView]);
+  }, [state]);
 
   useEffect(() => {
     const theme = getThemeDefinition(state.settings.theme);
@@ -65,27 +110,115 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     if (state.settings.connectOnStartup && state.settings.apiBaseUrl.trim()) {
-      void testConnection();
-    }
-  }, []);
+      let cancelled = false;
 
-  useEffect(() => {
-    // Load chats from backend on startup
-    if (state.settings.apiBaseUrl.trim()) {
-      loadChatsFromBackend(state.settings.apiBaseUrl)
-        .then((chats) => {
-          if (Array.isArray(chats) && chats.length > 0) {
-            chats.forEach((chat: any) => {
-              dispatch({ type: "createChat", payload: { chat } });
-            });
+      dispatch({
+        type: "setConnection",
+        payload: { status: "checking", error: null, lastCheckedAt: Date.now() },
+      });
+
+      checkBackendHealth(state.settings.apiBaseUrl, state.settings.requestTimeoutMs)
+        .then((payload) => {
+          if (cancelled) {
+            return;
           }
+
+          dispatch({
+            type: "setConnection",
+            payload: {
+              status: "online",
+              error: null,
+              version: payload.version ?? null,
+              lastCheckedAt: Date.now(),
+            },
+          });
+          dispatch({ type: "setBanner", payload: "Backend connection established ✓" });
         })
         .catch((error) => {
-          console.error("Failed to load chats from backend:", error);
-          // Silently fail - continue with local chats
+          if (cancelled) {
+            return;
+          }
+
+          dispatch({
+            type: "setConnection",
+            payload: {
+              status: "offline",
+              error: getErrorMessage(error),
+              version: null,
+              lastCheckedAt: Date.now(),
+            },
+          });
+          dispatch({ type: "setBanner", payload: getErrorMessage(error) });
         });
+
+      return () => {
+        cancelled = true;
+      };
     }
-  }, []);
+  }, [state.settings.apiBaseUrl, state.settings.connectOnStartup, state.settings.requestTimeoutMs]);
+
+  useEffect(() => {
+    if (!state.settings.apiBaseUrl.trim()) {
+      return;
+    }
+
+    loadChatsFromBackend(state.settings.apiBaseUrl)
+      .then((chats) => {
+        if (Array.isArray(chats) && chats.length > 0) {
+          dispatch({ type: "hydrateChats", payload: chats as Chat[] });
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load chats from backend:", error);
+      });
+  }, [state.settings.apiBaseUrl]);
+
+  useEffect(() => {
+    if (!selectedDocument?.documentSessionId || !state.settings.apiBaseUrl.trim()) {
+      return;
+    }
+
+    let cancelled = false;
+
+    refreshSessionFromBackend({
+      settings: state.settings,
+      documentSessionId: selectedDocument.documentSessionId,
+    })
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (payload.html) {
+          dispatch({
+            type: "setDocumentProjection",
+            payload: {
+              documentId: selectedDocument.id,
+              html: payload.html,
+              session: payload.session,
+              revisions: payload.revisions,
+            },
+          });
+          return;
+        }
+
+        dispatch({
+          type: "setDocumentSession",
+          payload: {
+            documentId: selectedDocument.id,
+            session: payload.session,
+            revisions: payload.revisions,
+          },
+        });
+      })
+      .catch((error) => {
+        console.error("Failed to refresh document session:", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDocument?.id, selectedDocument?.documentSessionId, state.settings]);
 
   async function importFiles(files: FileList | File[]) {
     const queue = Array.from(files);
@@ -96,53 +229,66 @@ export function AppProvider({ children }: PropsWithChildren) {
         dispatch({ type: "upsertDocument", payload: document });
         dispatch({ type: "selectDocument", payload: document.id });
 
-        if (document.status === "needs_backend") {
-          if (!state.settings.apiBaseUrl.trim()) {
-            dispatch({
-              type: "setBanner",
-              payload: `${document.name} requires the backend. Set the backend URL in the Connect panel.`,
-            });
-            dispatch({ type: "setActiveSidebarView", payload: "connect" });
-            continue;
-          }
+        if (document.status !== "needs_backend") {
+          continue;
+        }
 
-          // Automatically convert via backend
-          dispatch({ type: "setBanner", payload: `Importing ${document.name}…` });
-          try {
-            const result = await importDocumentFromBackend({
-              settings: state.settings,
-              file,
-            });
-            const normalized = normalizeDocumentHtml(result.html);
-            dispatch({
-              type: "upsertDocument",
-              payload: {
-                ...document,
-                status: "ready",
-                html: normalized.html,
-                outline: normalized.outline,
-                wordCount: normalized.wordCount,
-                backendDocId: result.docId,
-                error: undefined,
-                updatedAt: Date.now(),
-              },
-            });
-            dispatch({ type: "setBanner", payload: null });
-          } catch (importError) {
-            dispatch({
-              type: "upsertDocument",
-              payload: {
-                ...document,
-                status: "error",
-                error: getErrorMessage(importError),
-                updatedAt: Date.now(),
-              },
-            });
-            dispatch({
-              type: "setBanner",
-              payload: `Failed to import ${document.name}: ${getErrorMessage(importError)}`,
-            });
-          }
+        if (!state.settings.apiBaseUrl.trim()) {
+          dispatch({
+            type: "setBanner",
+            payload: `${document.name} requires the backend import flow. Verify the backend connection in the Connect panel.`,
+          });
+          dispatch({ type: "setActiveSidebarView", payload: "connect" });
+          continue;
+        }
+
+        dispatch({ type: "setBanner", payload: `Importing ${document.name}…` });
+
+        try {
+          const result = await importDocumentFromBackend({ settings: state.settings, file });
+          const normalized = normalizeDocumentHtml(result.html);
+
+          dispatch({
+            type: "upsertDocument",
+            payload: {
+              ...document,
+              status: "ready",
+              html: normalized.html,
+              outline: normalized.outline,
+              wordCount: normalized.wordCount,
+              backendDocId: result.docId ?? undefined,
+              documentSessionId: result.documentSessionId ?? undefined,
+              baseRevisionId: result.baseRevisionId ?? null,
+              currentRevisionId: result.baseRevisionId ?? null,
+              reviewPayload: null,
+              revisionStatus: null,
+              revisions: [],
+              sessionState: result.documentSessionId ? "READY" : null,
+              error: undefined,
+              updatedAt: Date.now(),
+            },
+          });
+
+          dispatch({
+            type: "setBanner",
+            payload: result.documentSessionId
+              ? `${document.name} imported into a canonical session.`
+              : `${document.name} imported as HTML only. AI review/apply flow requires a session-backed DOCX import.`,
+          });
+        } catch (importError) {
+          dispatch({
+            type: "upsertDocument",
+            payload: {
+              ...document,
+              status: "error",
+              error: getErrorMessage(importError),
+              updatedAt: Date.now(),
+            },
+          });
+          dispatch({
+            type: "setBanner",
+            payload: `Failed to import ${document.name}: ${getErrorMessage(importError)}`,
+          });
         }
       } catch (error) {
         dispatch({ type: "setBanner", payload: `Failed to import file: ${getErrorMessage(error)}` });
@@ -171,32 +317,23 @@ export function AppProvider({ children }: PropsWithChildren) {
   }
 
   async function testConnection() {
-    const providerUrl = (state.settings.providerEndpoint ?? "").trim();
-
-    if (!providerUrl) {
-      dispatch({ type: "setBanner", payload: "Set the Provider Endpoint before running a connection check." });
-      return;
-    }
-
     dispatch({
       type: "setConnection",
       payload: { status: "checking", error: null, lastCheckedAt: Date.now() },
     });
 
     try {
-      console.log("Testing provider connection to", providerUrl);
-      await checkProviderConnection(providerUrl, state.settings.requestTimeoutMs);
-
+      const payload = await checkBackendHealth(state.settings.apiBaseUrl, state.settings.requestTimeoutMs);
       dispatch({
         type: "setConnection",
         payload: {
           status: "online",
           error: null,
-          version: null,
+          version: payload.version ?? null,
           lastCheckedAt: Date.now(),
         },
       });
-      dispatch({ type: "setBanner", payload: "Provider connection established ✓" });
+      dispatch({ type: "setBanner", payload: "Backend connection established ✓" });
     } catch (error) {
       dispatch({
         type: "setConnection",
@@ -218,20 +355,20 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    if (!state.settings.apiBaseUrl.trim()) {
-      dispatch({ type: "setActiveSidebarView", payload: "connect" });
-      dispatch({ type: "setBanner", payload: "Set the backend URL before sending a request." });
-      return;
-    }
-
     if (selectedDocument.status !== "ready") {
-      dispatch({ type: "setBanner", payload: "This document requires backend import before it can be edited." });
+      dispatch({ type: "setBanner", payload: "This document must finish importing before it can be used." });
       return;
     }
 
-    // Determine which thread to add messages to (current chat or document)
-    const messageThreadId = state.selectedChatId || selectedDocument.id;
+    if (!selectedDocument.documentSessionId) {
+      dispatch({
+        type: "setBanner",
+        payload: "AI review/apply flow requires a session-backed DOCX import. Local HTML/Markdown/TXT documents can still be edited manually.",
+      });
+      return;
+    }
 
+    const messageThreadId = selectedChat?.id ?? selectedDocument.id;
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -239,7 +376,6 @@ export function AppProvider({ children }: PropsWithChildren) {
       createdAt: Date.now(),
       status: "sent",
     };
-
     const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
@@ -259,9 +395,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     let accumulated = "";
 
     try {
-      const reply = await sendPromptToBackend({
+      const reply = await sendAgentTurnToBackend({
         settings: state.settings,
-        document: selectedDocument,
+        chatId: messageThreadId,
+        documentSessionId: selectedDocument.documentSessionId,
+        currentRevisionId: selectedDocument.currentRevisionId ?? selectedDocument.baseRevisionId,
+        documentId: selectedDocument.id,
+        visibleBlockIds: selectedDocument.outline.map((item) => item.id),
         history: [...currentMessages, userMessage],
         prompt,
         signal: controller.signal,
@@ -278,45 +418,58 @@ export function AppProvider({ children }: PropsWithChildren) {
         },
       });
 
+      if (reply.status === "failed") {
+        throw new Error(formatNotices(reply.notices) || reply.message || "Agent turn failed.");
+      }
+
+      const assistantContent = reply.message || accumulated;
       dispatch({
         type: "updateMessage",
         payload: {
           documentId: messageThreadId,
           messageId: assistantMessage.id,
-          patch: { content: reply.message || accumulated, status: "sent" },
+          patch: { content: assistantContent, status: "sent" },
         },
       });
 
-      // Sync messages to backend if this is a chat
-      if (state.selectedChatId && state.settings.apiBaseUrl.trim()) {
+      if (selectedChat && state.settings.apiBaseUrl.trim()) {
         const updatedMessageThread: ChatMessage[] = [
           ...currentMessages,
           userMessage,
-          { ...assistantMessage, content: reply.message || accumulated, status: "sent" as "sent" },
+          { ...assistantMessage, content: assistantContent, status: "sent" },
         ];
-        updateChat(state.settings.apiBaseUrl, state.selectedChatId, {
+        updateChat(state.settings.apiBaseUrl, selectedChat.id, {
           messages: updatedMessageThread,
         }).catch((error) => {
           console.error("Failed to sync messages to backend:", error);
         });
       }
 
-      if (reply.documentHtml) {
+      if (reply.resultType === "revision_staged" && reply.revisionId) {
         dispatch({
-          type: "stageDocument",
-          payload: { documentId: selectedDocument.id, html: reply.documentHtml },
+          type: "stageRevision",
+          payload: {
+            documentId: selectedDocument.id,
+            revisionId: reply.revisionId,
+            reviewPayload: reply.review ?? null,
+            status: reply.proposal?.status ?? reply.status,
+            baseRevisionId: reply.baseRevisionId ?? selectedDocument.currentRevisionId ?? null,
+          },
         });
         dispatch({ type: "setActiveSidebarView", payload: "review" });
       }
 
-      if (reply.notices?.length) {
-        dispatch({ type: "setBanner", payload: reply.notices.join(" ") });
+      const noticeText = formatNotices(reply.notices);
+      if (noticeText) {
+        dispatch({ type: "setBanner", payload: noticeText });
+      } else if (reply.resultType === "revision_staged") {
+        dispatch({ type: "setBanner", payload: "Revision staged for review." });
       }
     } catch (error) {
       dispatch({
         type: "updateMessage",
         payload: {
-          documentId: selectedDocument.id,
+          documentId: messageThreadId,
           messageId: assistantMessage.id,
           patch: { role: "error", content: getErrorMessage(error), status: "error" },
         },
@@ -332,26 +485,110 @@ export function AppProvider({ children }: PropsWithChildren) {
     abortControllerRef.current?.abort();
   }
 
-  function acceptPendingChanges() {
-    if (!selectedDocument?.pendingHtml) {
+  async function applyStagedRevision() {
+    if (!selectedDocument?.pendingRevisionId) {
       return;
     }
 
-    dispatch({ type: "acceptPending", payload: { documentId: selectedDocument.id } });
-    dispatch({ type: "setBanner", payload: "Revision applied to the current document." });
+    try {
+      dispatch({ type: "setBanner", payload: "Applying revision…" });
+      const payload = await applyRevisionInBackend({
+        settings: state.settings,
+        revisionId: selectedDocument.pendingRevisionId,
+      });
+
+      if (!payload.html) {
+        throw new Error("The backend did not return a refreshed HTML projection after apply.");
+      }
+
+      dispatch({
+        type: "setDocumentProjection",
+        payload: {
+          documentId: selectedDocument.id,
+          html: payload.html,
+          session: payload.session,
+          revisions: payload.revisions,
+          clearReview: true,
+          revisionStatus: payload.result?.status ?? "APPLIED",
+        },
+      });
+      dispatch({ type: "setBanner", payload: "Revision applied to the canonical document." });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Failed to apply revision: ${getErrorMessage(error)}` });
+    }
   }
 
-  function discardPendingChanges() {
-    if (!selectedDocument?.pendingHtml) {
+  async function rejectStagedRevision() {
+    if (!selectedDocument?.pendingRevisionId) {
       return;
     }
 
-    dispatch({ type: "discardPending", payload: { documentId: selectedDocument.id } });
-    dispatch({ type: "setBanner", payload: "Revision discarded." });
+    try {
+      dispatch({ type: "setBanner", payload: "Rejecting revision…" });
+      const payload = await rejectRevisionInBackend({
+        settings: state.settings,
+        revisionId: selectedDocument.pendingRevisionId,
+      });
+
+      dispatch({
+        type: "setDocumentSession",
+        payload: {
+          documentId: selectedDocument.id,
+          session: payload.session,
+          revisions: payload.revisions,
+          clearReview: true,
+          revisionStatus: payload.result?.status ?? "REJECTED",
+        },
+      });
+      dispatch({ type: "setBanner", payload: "Revision rejected." });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Failed to reject revision: ${getErrorMessage(error)}` });
+    }
+  }
+
+  async function rollbackCurrentRevision() {
+    if (!selectedDocument?.currentRevisionId) {
+      return;
+    }
+
+    try {
+      dispatch({ type: "setBanner", payload: "Rolling back current revision…" });
+      const payload = await rollbackRevisionInBackend({
+        settings: state.settings,
+        revisionId: selectedDocument.currentRevisionId,
+      });
+
+      if (!payload.html) {
+        throw new Error("The backend did not return a refreshed HTML projection after rollback.");
+      }
+
+      dispatch({
+        type: "setDocumentProjection",
+        payload: {
+          documentId: selectedDocument.id,
+          html: payload.html,
+          session: payload.session,
+          revisions: payload.revisions,
+          clearReview: true,
+          revisionStatus: payload.result?.status ?? "REJECTED",
+        },
+      });
+      dispatch({ type: "setBanner", payload: "Rolled back to the previous canonical revision." });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Failed to roll back revision: ${getErrorMessage(error)}` });
+    }
   }
 
   function updateSelectedDocumentHtml(html: string) {
     if (!selectedDocument) {
+      return;
+    }
+
+    if (selectedDocument.documentSessionId) {
+      dispatch({
+        type: "setBanner",
+        payload: "Session-backed documents are read-only projections. Use the assistant to stage canonical revisions instead of editing the HTML directly.",
+      });
       return;
     }
 
@@ -363,9 +600,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    if (!state.settings.apiBaseUrl.trim()) {
-      dispatch({ type: "setBanner", payload: "Set the backend URL to export as DOCX." });
-      dispatch({ type: "setActiveSidebarView", payload: "connect" });
+    if (!selectedDocument.documentSessionId) {
+      dispatch({
+        type: "setBanner",
+        payload: "DOCX export now requires a canonical document session. Import a DOCX through the backend-backed flow first.",
+      });
       return;
     }
 
@@ -373,8 +612,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       dispatch({ type: "setBanner", payload: `Exporting ${selectedDocument.name}…` });
       const blob = await exportDocumentToDocx({
         settings: state.settings,
-        html: selectedDocument.html,
-        backendDocId: selectedDocument.backendDocId,
+        documentSessionId: selectedDocument.documentSessionId,
         filename: selectedDocument.name,
       });
 
@@ -401,8 +639,16 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    dispatch({ type: "clearMessages", payload: selectedDocument.id });
+    const messageThreadId = selectedChat?.id ?? selectedDocument.id;
+    dispatch({ type: "clearMessages", payload: messageThreadId });
     dispatch({ type: "setComposer", payload: "" });
+
+    if (selectedChat && state.settings.apiBaseUrl.trim()) {
+      updateChat(state.settings.apiBaseUrl, selectedChat.id, { messages: [] }).catch((error) => {
+        console.error("Failed to clear chat on backend:", error);
+        dispatch({ type: "setBanner", payload: "Chat cleared locally, but failed to sync the backend copy." });
+      });
+    }
   }
 
   function createNewChat() {
@@ -422,12 +668,15 @@ export function AppProvider({ children }: PropsWithChildren) {
     dispatch({ type: "createChat", payload: { chat } });
     dispatch({ type: "setComposer", payload: "" });
 
-    // Sync to backend
     if (state.settings.apiBaseUrl.trim()) {
-      saveChat(state.settings.apiBaseUrl, chat).catch((error) => {
-        console.error("Failed to save chat to backend:", error);
-        dispatch({ type: "setBanner", payload: "Chat created locally, but failed to save to backend." });
-      });
+      saveChat(state.settings.apiBaseUrl, chat)
+        .then((savedChat) => {
+          dispatch({ type: "createChat", payload: { chat: savedChat as Chat } });
+        })
+        .catch((error) => {
+          console.error("Failed to save chat to backend:", error);
+          dispatch({ type: "setBanner", payload: "Chat created locally, but failed to save to backend." });
+        });
     }
   }
 
@@ -437,7 +686,6 @@ export function AppProvider({ children }: PropsWithChildren) {
   }
 
   function deleteChat(chatId: string) {
-    // Sync to backend first
     if (state.settings.apiBaseUrl.trim()) {
       deleteChatApi(state.settings.apiBaseUrl, chatId).catch((error) => {
         console.error("Failed to delete chat from backend:", error);
@@ -450,7 +698,6 @@ export function AppProvider({ children }: PropsWithChildren) {
   function renameChat(chatId: string, newName: string) {
     dispatch({ type: "renameChat", payload: { chatId, name: newName } });
 
-    // Sync to backend
     if (state.settings.apiBaseUrl.trim()) {
       updateChat(state.settings.apiBaseUrl, chatId, { name: newName }).catch((error) => {
         console.error("Failed to update chat on backend:", error);
@@ -474,8 +721,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         testConnection,
         sendMessage,
         cancelRequest,
-        acceptPendingChanges,
-        discardPendingChanges,
+        applyStagedRevision,
+        rejectStagedRevision,
+        rollbackCurrentRevision,
         updateSelectedDocumentHtml,
         exportDocument,
         clearBanner,

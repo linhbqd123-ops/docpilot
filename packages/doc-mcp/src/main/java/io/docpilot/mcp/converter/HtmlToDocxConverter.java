@@ -1,4 +1,4 @@
-﻿package io.docpilot.mcp.converter;
+package io.docpilot.mcp.converter;
 
 import io.docpilot.mcp.exception.ConversionException;
 import io.docpilot.mcp.model.legacy.StyleEntry;
@@ -65,7 +65,7 @@ public class HtmlToDocxConverter {
             // Export to DOCX bytes
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             wmlPackage.save(baos);
-            log.info("HTMLâ†’DOCX complete: {} bytes", baos.size());
+            log.info("HTML→DOCX complete: {} bytes", baos.size());
             return baos.toByteArray();
 
         } catch (ConversionException ce) {
@@ -103,7 +103,7 @@ public class HtmlToDocxConverter {
 
                 Style style = existingById.get(styleId);
                 if (style == null) {
-                    // Style doesn't exist yet â€” create it
+                    // Style doesn't exist yet — create it
                     style = createStyle(styleId, se);
                     styles.getStyle().add(style);
                 } else {

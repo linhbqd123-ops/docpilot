@@ -1,10 +1,27 @@
-import type { AppSettings, AppState, Chat, ChatMessage, ConnectionState, DocumentRecord, PersistedState, SidebarView } from "@/app/types";
+import type {
+  AppSettings,
+  AppState,
+  Chat,
+  ChatMessage,
+  ConnectionState,
+  DocumentRecord,
+  PersistedState,
+  RevisionReview,
+  SessionRevisionSummary,
+  SessionSummary,
+  SidebarView,
+} from "@/app/types";
 import { DEFAULT_THEME, isThemeMode } from "@/app/themes";
-import { commitPendingDocument, discardPendingDocument, stageDocumentHtml, updateDocumentHtml } from "@/lib/document";
+import {
+  applyDocumentProjection,
+  applyDocumentSessionSummary,
+  clearDocumentReview,
+  stageDocumentReview,
+  updateDocumentHtml,
+} from "@/lib/document";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   apiBaseUrl: "http://localhost:8000", // Backend server - FIXED, not user-configurable
-  providerEndpoint: "", // Provider API endpoint - user-configurable
   provider: (import.meta.env.VITE_DOCPILOT_PROVIDER as AppSettings["provider"] | undefined) ?? "ollama",
   modelOverride: "",
   requestTimeoutMs: 30_000,
@@ -57,13 +74,43 @@ type Action =
   | { type: "addMessage"; payload: { documentId: string; message: ChatMessage } }
   | { type: "updateMessage"; payload: { documentId: string; messageId: string; patch: Partial<ChatMessage> } }
   | { type: "clearMessages"; payload: string }
+  | { type: "hydrateChats"; payload: Chat[] }
   | { type: "createChat"; payload: { chat: Chat } }
   | { type: "selectChat"; payload: string | null }
   | { type: "deleteChat"; payload: string }
   | { type: "renameChat"; payload: { chatId: string; name: string } }
-  | { type: "stageDocument"; payload: { documentId: string; html: string } }
-  | { type: "acceptPending"; payload: { documentId: string } }
-  | { type: "discardPending"; payload: { documentId: string } }
+  | {
+      type: "setDocumentProjection";
+      payload: {
+        documentId: string;
+        html: string;
+        session?: SessionSummary;
+        revisions?: SessionRevisionSummary[];
+        clearReview?: boolean;
+        revisionStatus?: string | null;
+      };
+    }
+  | {
+      type: "setDocumentSession";
+      payload: {
+        documentId: string;
+        session: SessionSummary;
+        revisions?: SessionRevisionSummary[];
+        clearReview?: boolean;
+        revisionStatus?: string | null;
+      };
+    }
+  | {
+      type: "stageRevision";
+      payload: {
+        documentId: string;
+        revisionId: string;
+        reviewPayload: RevisionReview | null;
+        status?: string | null;
+        baseRevisionId?: string | null;
+      };
+    }
+  | { type: "clearRevision"; payload: { documentId: string; status?: string | null } }
   | { type: "updateDocumentHtml"; payload: { documentId: string; html: string } };
 
 export function appReducer(state: AppState, action: Action): AppState {
@@ -88,15 +135,23 @@ export function appReducer(state: AppState, action: Action): AppState {
 
     case "removeDocument": {
       const documents = state.documents.filter((document) => document.id !== action.payload);
+      const removedChatIds = state.chats
+        .filter((chat) => chat.documentId === action.payload)
+        .map((chat) => chat.id);
+      const chats = state.chats.filter((chat) => chat.documentId !== action.payload);
       const messageThreads = { ...state.messageThreads };
       delete messageThreads[action.payload];
+      removedChatIds.forEach((chatId) => delete messageThreads[chatId]);
 
       return {
         ...state,
         documents,
+        chats,
         messageThreads,
         selectedDocumentId:
           state.selectedDocumentId === action.payload ? documents[0]?.id ?? null : state.selectedDocumentId,
+        selectedChatId:
+          state.selectedChatId && removedChatIds.includes(state.selectedChatId) ? null : state.selectedChatId,
       };
     }
 
@@ -104,6 +159,12 @@ export function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         selectedDocumentId: action.payload,
+        selectedChatId:
+          action.payload && state.selectedChatId && state.chats.some(
+            (chat) => chat.id === state.selectedChatId && chat.documentId === action.payload,
+          )
+            ? state.selectedChatId
+            : null,
       };
 
     case "setComposer":
@@ -144,26 +205,38 @@ export function appReducer(state: AppState, action: Action): AppState {
 
     case "addMessage": {
       const currentThread = state.messageThreads[action.payload.documentId] ?? [];
+      const nextThread = [...currentThread, action.payload.message];
 
       return {
         ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === action.payload.documentId
+            ? { ...chat, messages: nextThread, updatedAt: Date.now() }
+            : chat,
+        ),
         messageThreads: {
           ...state.messageThreads,
-          [action.payload.documentId]: [...currentThread, action.payload.message],
+          [action.payload.documentId]: nextThread,
         },
       };
     }
 
     case "updateMessage": {
       const currentThread = state.messageThreads[action.payload.documentId] ?? [];
+      const nextThread = currentThread.map((message) =>
+        message.id === action.payload.messageId ? { ...message, ...action.payload.patch } : message,
+      );
 
       return {
         ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === action.payload.documentId
+            ? { ...chat, messages: nextThread, updatedAt: Date.now() }
+            : chat,
+        ),
         messageThreads: {
           ...state.messageThreads,
-          [action.payload.documentId]: currentThread.map((message) =>
-            message.id === action.payload.messageId ? { ...message, ...action.payload.patch } : message,
-          ),
+          [action.payload.documentId]: nextThread,
         },
       };
     }
@@ -174,15 +247,42 @@ export function appReducer(state: AppState, action: Action): AppState {
 
       return {
         ...state,
+        chats: state.chats.map((chat) =>
+          chat.id === action.payload ? { ...chat, messages: [], updatedAt: Date.now() } : chat,
+        ),
         messageThreads,
       };
     }
 
-    case "createChat": {
-      const newChats = [action.payload.chat, ...state.chats];
+    case "hydrateChats": {
+      const mergedChats = new Map(state.chats.map((chat) => [chat.id, chat]));
+      action.payload.forEach((chat) => mergedChats.set(chat.id, chat));
+
+      const chats = Array.from(mergedChats.values()).sort((left, right) => right.updatedAt - left.updatedAt);
+      const messageThreads = { ...state.messageThreads };
+      chats.forEach((chat) => {
+        messageThreads[chat.id] = chat.messages;
+      });
+
       return {
         ...state,
-        chats: newChats,
+        chats,
+        messageThreads,
+        selectedChatId:
+          state.selectedChatId && chats.some((chat) => chat.id === state.selectedChatId)
+            ? state.selectedChatId
+            : null,
+      };
+    }
+
+    case "createChat": {
+      const exists = state.chats.some((chat) => chat.id === action.payload.chat.id);
+      const chats = exists
+        ? state.chats.map((chat) => (chat.id === action.payload.chat.id ? action.payload.chat : chat))
+        : [action.payload.chat, ...state.chats];
+      return {
+        ...state,
+        chats,
         selectedChatId: action.payload.chat.id,
         messageThreads: {
           ...state.messageThreads,
@@ -194,7 +294,12 @@ export function appReducer(state: AppState, action: Action): AppState {
     case "selectChat":
       return {
         ...state,
-        selectedChatId: action.payload,
+        selectedChatId:
+          action.payload && state.selectedDocumentId && state.chats.some(
+            (chat) => chat.id === action.payload && chat.documentId === state.selectedDocumentId,
+          )
+            ? action.payload
+            : null,
       };
 
     case "deleteChat": {
@@ -222,25 +327,92 @@ export function appReducer(state: AppState, action: Action): AppState {
       };
     }
 
-    case "stageDocument":
+    case "setDocumentProjection":
+      return {
+        ...state,
+        documents: state.documents.map((document) => {
+          if (document.id !== action.payload.documentId) {
+            return document;
+          }
+
+          let nextDocument = applyDocumentProjection(document, action.payload.html);
+
+          if (action.payload.session) {
+            nextDocument = applyDocumentSessionSummary(
+              nextDocument,
+              action.payload.session,
+              action.payload.revisions ?? nextDocument.revisions,
+            );
+          }
+
+          if (action.payload.clearReview) {
+            nextDocument = clearDocumentReview(nextDocument, {
+              status: action.payload.revisionStatus ?? null,
+            });
+          } else if (action.payload.revisionStatus !== undefined) {
+            nextDocument = {
+              ...nextDocument,
+              revisionStatus: action.payload.revisionStatus,
+              updatedAt: Date.now(),
+            };
+          }
+
+          return nextDocument;
+        }),
+      };
+
+    case "setDocumentSession":
+      return {
+        ...state,
+        documents: state.documents.map((document) => {
+          if (document.id !== action.payload.documentId) {
+            return document;
+          }
+
+          let nextDocument = applyDocumentSessionSummary(
+            document,
+            action.payload.session,
+            action.payload.revisions ?? document.revisions,
+          );
+
+          if (action.payload.clearReview) {
+            nextDocument = clearDocumentReview(nextDocument, {
+              status: action.payload.revisionStatus ?? null,
+            });
+          } else if (action.payload.revisionStatus !== undefined) {
+            nextDocument = {
+              ...nextDocument,
+              revisionStatus: action.payload.revisionStatus,
+              updatedAt: Date.now(),
+            };
+          }
+
+          return nextDocument;
+        }),
+      };
+
+    case "stageRevision":
       return {
         ...state,
         documents: state.documents.map((document) =>
-          document.id === action.payload.documentId ? stageDocumentHtml(document, action.payload.html) : document,
+          document.id === action.payload.documentId
+            ? stageDocumentReview(document, {
+                revisionId: action.payload.revisionId,
+                reviewPayload: action.payload.reviewPayload,
+                status: action.payload.status,
+                baseRevisionId: action.payload.baseRevisionId,
+              })
+            : document,
         ),
       };
 
-    case "acceptPending":
+    case "clearRevision":
       return {
         ...state,
         documents: state.documents.map((document) =>
-          document.id === action.payload.documentId ? commitPendingDocument(document) : document,
-        ),
-      };
-      return {
-        ...state,
-        documents: state.documents.map((document) =>
-          document.id === action.payload.documentId ? discardPendingDocument(document) : document,
+          document.id === action.payload.documentId
+            ? clearDocumentReview(document, { status: action.payload.status ?? null })
+            : document,
         ),
       };
 

@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { Check, Download, Eye, FileCog, PenSquare, RefreshCw, Sparkles, Undo2, X } from "lucide-react";
+import { Check, Download, FileCog, Lock, RefreshCw, Sparkles, Undo2, X } from "lucide-react";
 
 import { useAppContext } from "@/app/context";
 import { DocumentCanvas } from "@/components/editor/DocumentCanvas";
@@ -9,17 +8,11 @@ export function DocumentWorkspace() {
   const {
     selectedDocument,
     updateSelectedDocumentHtml,
-    acceptPendingChanges,
-    discardPendingChanges,
+    applyStagedRevision,
+    rejectStagedRevision,
+    rollbackCurrentRevision,
     exportDocument,
   } = useAppContext();
-  const [previewPending, setPreviewPending] = useState(false);
-
-  useEffect(() => {
-    if (!selectedDocument?.pendingHtml) {
-      setPreviewPending(false);
-    }
-  }, [selectedDocument?.id, selectedDocument?.pendingHtml]);
 
   if (!selectedDocument) {
     return (
@@ -28,20 +21,17 @@ export function DocumentWorkspace() {
           <p className="text-xs uppercase tracking-[0.22em] text-docpilot-muted">Workspace</p>
           <h2 className="mt-3 font-display text-4xl text-docpilot-textStrong">Document-native AI editing starts here</h2>
           <p className="mt-4 text-base leading-8 text-docpilot-muted">
-            Import a document from the Library panel to open the editor surface. Text-based formats render locally.
-            DOCX and PDF stay in the workflow without fake preview until your backend import pipeline is ready.
+            Import a document from the Library panel to open the editor surface. Local HTML, Markdown, and TXT files
+            can be edited directly. DOCX imports stay canonical and revision-backed through the MCP session flow.
           </p>
         </div>
       </div>
     );
   }
 
-  const currentHtml = previewPending && selectedDocument.pendingHtml
-    ? selectedDocument.pendingHtml
-    : selectedDocument.html;
-  const currentWordCount = previewPending && selectedDocument.pendingWordCount !== undefined
-    ? selectedDocument.pendingWordCount
-    : selectedDocument.wordCount;
+  const isSessionBacked = Boolean(selectedDocument.documentSessionId);
+  const hasPendingRevision = Boolean(selectedDocument.pendingRevisionId);
+  const isEditable = selectedDocument.status === "ready" && !isSessionBacked;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-gradient-to-b from-transparent to-docpilot-panelAlt">
@@ -50,46 +40,40 @@ export function DocumentWorkspace() {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="badge">{selectedDocument.kind}</span>
-              <span className="badge">{selectedDocument.status === "ready" ? "editable" : "backend import"}</span>
-              {selectedDocument.pendingHtml ? <span className="badge">revision staged</span> : null}
+              <span className="badge">{isSessionBacked ? "session-backed" : selectedDocument.status === "ready" ? "local draft" : "backend import"}</span>
+              {hasPendingRevision ? <span className="badge">revision staged</span> : null}
             </div>
             <h1 className="mt-3 text-2xl font-semibold text-docpilot-textStrong">{selectedDocument.name}</h1>
             <p className="mt-1 text-sm text-docpilot-muted">
-              {currentWordCount} words · direct manual edits are autosaved on blur.
+              {selectedDocument.wordCount} words
+              {isSessionBacked
+                ? " · canonical projection from the active document session"
+                : " · direct manual edits are autosaved on blur"}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {selectedDocument.pendingHtml ? (
+            {hasPendingRevision ? (
               <>
-                <button
-                  type="button"
-                  className={cn("action-button", !previewPending ? "border-docpilot-accent/40 bg-docpilot-accentSoft shadow-active" : "")}
-                  onClick={() => setPreviewPending(false)}
-                >
-                  <PenSquare size={14} /> Current
-                </button>
-                <button
-                  type="button"
-                  className={cn("action-button", previewPending ? "border-docpilot-accent/40 bg-docpilot-accentSoft shadow-active" : "")}
-                  onClick={() => setPreviewPending(true)}
-                >
-                  <Eye size={14} /> Revision
-                </button>
-                <button type="button" className="action-button-primary" onClick={acceptPendingChanges}>
+                <button type="button" className="action-button-primary" onClick={() => void applyStagedRevision()}>
                   <Check size={14} /> Apply
                 </button>
-                <button type="button" className="action-button" onClick={discardPendingChanges}>
+                <button type="button" className="action-button" onClick={() => void rejectStagedRevision()}>
                   <X size={14} /> Reject
                 </button>
               </>
             ) : (
-              <button type="button" className="action-button" disabled>
-                <Sparkles size={14} /> Waiting for backend revision
+              <button type="button" className="action-button" disabled={!isSessionBacked}>
+                <Sparkles size={14} /> {isSessionBacked ? "No staged revision" : "Local editing only"}
               </button>
             )}
+            {isSessionBacked && selectedDocument.currentRevisionId ? (
+              <button type="button" className="action-button" onClick={() => void rollbackCurrentRevision()}>
+                <Undo2 size={14} /> Roll back
+              </button>
+            ) : null}
             {selectedDocument.status === "ready" ? (
-              <button type="button" className="action-button" onClick={() => void exportDocument()}>
+              <button type="button" className={cn("action-button", !isSessionBacked ? "opacity-60" : "")} onClick={() => void exportDocument()} disabled={!isSessionBacked}>
                 <Download size={14} /> Export DOCX
               </button>
             ) : null}
@@ -105,8 +89,8 @@ export function DocumentWorkspace() {
               <p className="font-medium text-docpilot-textStrong">Backend import required</p>
             </div>
             <p className="leading-7 text-docpilot-muted">
-              This file format cannot be rendered client-side without inventing a fake preview. Connect your backend and
-              implement `/api/documents/import` to convert it into reviewable HTML.
+              This file format cannot be rendered client-side without inventing a fake preview. Import it through the
+              backend so the editor can attach a canonical document session and revision history.
             </p>
           </div>
         </div>
@@ -115,11 +99,16 @@ export function DocumentWorkspace() {
           <div className="border-b border-docpilot-border px-6 py-3 text-sm text-docpilot-muted">
             <div className="flex flex-wrap items-center gap-4">
               <span className="inline-flex items-center gap-2">
-                <RefreshCw size={14} /> autosave on blur
+                {isSessionBacked ? <Lock size={14} /> : <RefreshCw size={14} />}
+                {isSessionBacked ? "read-only canonical projection" : "autosave on blur"}
               </span>
-              {selectedDocument.pendingHtml ? (
+              {hasPendingRevision ? (
                 <span className="inline-flex items-center gap-2 text-docpilot-warning">
                   <Undo2 size={14} /> review mode is non-destructive until you apply it
+                </span>
+              ) : isSessionBacked ? (
+                <span className="inline-flex items-center gap-2 text-docpilot-muted">
+                  <Sparkles size={14} /> use the assistant to stage structured revisions
                 </span>
               ) : null}
             </div>
@@ -127,8 +116,8 @@ export function DocumentWorkspace() {
 
           <div className="scrollbar-thin flex-1 overflow-auto px-10 py-10">
             <DocumentCanvas
-              html={currentHtml}
-              editable={!previewPending}
+              html={selectedDocument.html}
+              editable={isEditable}
               onCommit={updateSelectedDocumentHtml}
             />
           </div>

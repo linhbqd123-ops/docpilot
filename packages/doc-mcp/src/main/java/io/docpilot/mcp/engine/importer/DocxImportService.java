@@ -1,9 +1,11 @@
 package io.docpilot.mcp.engine.importer;
 
+import io.docpilot.mcp.converter.DocxToHtmlConverter;
 import io.docpilot.mcp.engine.anchor.AnchorService;
 import io.docpilot.mcp.model.document.*;
 import io.docpilot.mcp.model.session.DocumentSession;
 import io.docpilot.mcp.model.session.SessionState;
+import io.docpilot.mcp.storage.RegistryStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.docx4j.XmlUtils;
@@ -34,6 +36,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class DocxImportService {
 
     private final AnchorService anchorService;
+    private final DocxToHtmlConverter docxToHtmlConverter;
+    private final RegistryStore registryStore;
 
     // -----------------------------------------------------------------------
     //  Public API
@@ -134,6 +138,8 @@ public class DocxImportService {
             .imageCount(imageCount.get())
             .sectionCount(sectionCount.get())
             .build();
+
+        registryStore.saveRegistry(docxToHtmlConverter.extractRegistry(wml, docId, filename));
 
         log.info("DOCX imported: sessionId={} docId={} words={} paragraphs={} tables={}",
             sessionId, docId, wordCount.get(), paragraphCount.get(), tableCount.get());

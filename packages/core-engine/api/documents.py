@@ -1,11 +1,14 @@
 import html as html_module
 
-import httpx
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from config import settings
+from services.doc_mcp_client import (
+    DocMcpClient,
+    DocMcpResponseError,
+    DocMcpUnavailableError,
+)
 
 router = APIRouter()
 
@@ -42,6 +45,10 @@ def _text_to_html(text: str) -> str:
     return "".join(f"<p>{e}</p>" for e in escaped)
 
 
+def _doc_mcp_client() -> DocMcpClient:
+    return DocMcpClient()
+
+
 # ---------------------------------------------------------------------------
 # POST /api/documents/import
 # ---------------------------------------------------------------------------
@@ -50,16 +57,15 @@ def _text_to_html(text: str) -> str:
 @router.post("/documents/import")
 async def import_document(file: UploadFile = File(...)):
     """
-    Accept a DOCX or PDF file, convert it to HTML via the Java doc-processor,
-    and return the result to the frontend.
+    Accept a DOCX or PDF file and return an editable HTML representation.
     """
     filename = file.filename or "document"
     content_type = file.content_type or ""
 
     if _is_docx(filename, content_type):
-        java_endpoint = "/api/convert/docx-to-html"
+        import_kind = "docx"
     elif _is_pdf(filename, content_type):
-        java_endpoint = "/api/convert/pdf-to-text"
+        import_kind = "pdf"
     else:
         raise HTTPException(
             status_code=415,
@@ -67,46 +73,38 @@ async def import_document(file: UploadFile = File(...)):
         )
 
     content = await file.read()
+    client = _doc_mcp_client()
 
     try:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-            resp = await client.post(
-                f"{settings.doc_processor_url}{java_endpoint}",
-                files={"file": (filename, content, content_type)},
-            )
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Doc-processor service is unavailable. "
-                "Make sure the Java doc-processor is running on "
-                f"{settings.doc_processor_url}."
-            ),
-        )
-
-    if not resp.is_success:
-        raise HTTPException(status_code=502, detail=f"Doc-processor error: {resp.text}")
-
-    data = resp.json()
-
-    if java_endpoint == "/api/convert/pdf-to-text":
-        # PDF: wrap extracted text in basic HTML
+        if import_kind == "docx":
+            session = await client.import_docx_session(filename, content, content_type)
+            html = await client.get_html_projection(session["session_id"], fragment=True)
+            return {
+                "docId": session.get("doc_id"),
+                "documentSessionId": session.get("session_id"),
+                "baseRevisionId": None,
+                "html": html,
+                "wordCount": session.get("word_count", 0),
+                "pageCount": 0,
+                "filename": filename,
+            }
+        data = await client.import_pdf_to_html(filename, content, content_type)
         return {
-            "docId": data.get("docId"),
-            "html": _text_to_html(data.get("content", "")),
-            "wordCount": data.get("wordCount", 0),
-            "pageCount": 0,
+            "docId": None,
+            "documentSessionId": None,
+            "baseRevisionId": None,
+            "html": data.get("html") or _text_to_html(data.get("content", "")),
+            "wordCount": data.get("word_count", data.get("wordCount", 0)),
+            "pageCount": data.get("page_count", data.get("pageCount", 0)),
             "filename": filename,
         }
-
-    # DOCX: return html + metadata (styleRegistry stays in Java's RegistryStore)
-    return {
-        "docId": data.get("docId"),
-        "html": data.get("html", ""),
-        "wordCount": data.get("wordCount", 0),
-        "pageCount": data.get("pageCount", 0),
-        "filename": filename,
-    }
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, DocMcpUnavailableError):
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if isinstance(exc, DocMcpResponseError):
+            status_code = exc.status_code if exc.status_code in {400, 404, 409} else 502
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"Doc-mcp import failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -115,45 +113,37 @@ async def import_document(file: UploadFile = File(...)):
 
 
 class ExportRequest(BaseModel):
-    html: str
-    doc_id: str | None = None
+    model_config = ConfigDict(populate_by_name=True)
+
+    document_session_id: str | None = Field(default=None, alias="documentSessionId")
     filename: str = "document.docx"
 
 
 @router.post("/documents/export")
 async def export_document(request: ExportRequest):
     """
-    Convert HTML back to DOCX via the Java doc-processor.
-    If doc_id is provided, Java re-applies the stored style registry for that document.
+    Export the current document to DOCX.
     """
-    payload: dict = {"html": request.html}
-    if request.doc_id:
-        payload["doc_id"] = request.doc_id
+    if not request.document_session_id:
+        raise HTTPException(status_code=400, detail="documentSessionId is required for export.")
 
+    client = _doc_mcp_client()
     try:
-        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
-            resp = await client.post(
-                f"{settings.doc_processor_url}/api/convert/html-to-docx",
-                json=payload,
-            )
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Doc-processor service is unavailable. "
-                "Make sure the Java doc-processor is running."
-            ),
-        )
-
-    if not resp.is_success:
-        raise HTTPException(status_code=502, detail=f"Doc-processor error: {resp.text}")
+        docx_bytes = await client.export_session_docx(request.document_session_id)
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, DocMcpUnavailableError):
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if isinstance(exc, DocMcpResponseError):
+            status_code = exc.status_code if exc.status_code in {400, 404, 409} else 502
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"Doc-mcp export failed: {exc}") from exc
 
     filename = request.filename
     if not filename.lower().endswith(".docx"):
         filename = filename.rsplit(".", 1)[0] + ".docx"
 
     return Response(
-        content=resp.content,
+        content=docx_bytes,
         media_type=(
             "application/vnd.openxmlformats-officedocument"
             ".wordprocessingml.document"

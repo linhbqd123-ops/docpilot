@@ -1,12 +1,15 @@
 package io.docpilot.mcp.engine.revision;
 
 import io.docpilot.mcp.engine.patch.PatchEngine;
+import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.patch.Patch;
 import io.docpilot.mcp.model.patch.PatchValidation;
 import io.docpilot.mcp.model.revision.ConflictRevision;
 import io.docpilot.mcp.model.revision.Revision;
 import io.docpilot.mcp.model.revision.RevisionStatus;
 import io.docpilot.mcp.model.session.DocumentSession;
+import io.docpilot.mcp.personalization.SemanticSearchService;
+import io.docpilot.mcp.store.DocumentSessionStore;
 import io.docpilot.mcp.store.RevisionStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +37,8 @@ public class RevisionService {
 
     private final PatchEngine patchEngine;
     private final RevisionStore revisionStore;
+    private final DocumentSessionStore sessionStore;
+    private final SemanticSearchService semanticSearchService;
 
     // -----------------------------------------------------------------------
     //  Stage (create PENDING revision)
@@ -129,6 +134,9 @@ public class RevisionService {
 
         // ── Apply ─────────────────────────────────────────────────────────
         patchEngine.apply(patch, session, revisionId, revision.getAuthor());
+        revisionStore.saveSnapshot(session.getSessionId(), revisionId, session.getRoot());
+        sessionStore.save(session);
+        semanticSearchService.reindexSession(session);
 
         Revision applied = updateStatus(revision, RevisionStatus.APPLIED);
         applied = applied.toBuilder().appliedAt(Instant.now()).build();
@@ -169,10 +177,25 @@ public class RevisionService {
             throw new IllegalStateException("Can only roll back an APPLIED revision");
         }
 
-        // Mark as rejected (caller is responsible for restoring the session from a snapshot)
+        if (!Objects.equals(session.getCurrentRevisionId(), revisionId)) {
+            throw new IllegalStateException("Can only roll back the current applied revision");
+        }
+
+        DocumentComponent restoredRoot = revision.getBaseRevisionId() == null || revision.getBaseRevisionId().isBlank()
+            ? revisionStore.findInitialSnapshot(session.getSessionId())
+                .orElseThrow(() -> new IllegalStateException("Initial snapshot not found for session " + session.getSessionId()))
+            : revisionStore.findSnapshot(session.getSessionId(), revision.getBaseRevisionId())
+                .orElseThrow(() -> new IllegalStateException("Snapshot not found for revision " + revision.getBaseRevisionId()));
+
+        session.setRoot(restoredRoot);
+        session.setCurrentRevisionId(revision.getBaseRevisionId());
+        session.setLastModifiedAt(Instant.now());
+        sessionStore.save(session);
+        semanticSearchService.reindexSession(session);
+
         Revision rolledBack = updateStatus(revision, RevisionStatus.REJECTED);
         revisionStore.saveRevision(rolledBack);
-        log.info("Revision {} marked for rollback — caller must restore snapshot", revisionId);
+        log.info("Revision {} rolled back for session {}", revisionId, session.getSessionId());
         return rolledBack;
     }
 

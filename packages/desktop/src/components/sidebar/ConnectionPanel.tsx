@@ -1,8 +1,9 @@
-import { Cpu, Link2, PlugZap } from "lucide-react";
+import { Cpu, PlugZap, Server, Waypoints } from "lucide-react";
 
+import type { AppSettings } from "@/app/types";
+import { useAppContext } from "@/app/context";
 import Dropdown from "@/components/ui/Dropdown";
 import { KeyManager } from "@/components/ui/KeyManager";
-import { useAppContext } from "@/app/context";
 import { formatRelativeTime } from "@/lib/utils";
 
 export function ConnectionPanel() {
@@ -17,17 +18,16 @@ export function ConnectionPanel() {
 
       <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
         <div className="panel-card p-4">
-          <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">Provider Endpoint</label>
+          <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">Backend URL</label>
           <div className="relative">
-            <Link2 size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-docpilot-muted" />
+            <Server size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-docpilot-muted" />
             <input
-              value={state.settings.providerEndpoint ?? ""}
-              onChange={(event) => updateSettings({ providerEndpoint: event.target.value })}
-              className="field-shell w-full pl-10"
-              placeholder="e.g. https://api.groq.com/openai/v1"
+              value={state.settings.apiBaseUrl}
+              readOnly
+              className="field-shell w-full pl-10 opacity-80"
             />
           </div>
-          <p className="mt-1.5 text-xs text-docpilot-muted">Provider API endpoint URL (optional for some providers)</p>
+          <p className="mt-1.5 text-xs text-docpilot-muted">The desktop app talks to the local core-engine backend. Provider endpoints are resolved server-side.</p>
 
           <label className="mb-2 mt-4 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">Provider</label>
           <Dropdown
@@ -94,17 +94,14 @@ export function ConnectionPanel() {
         <div className="panel-card p-4 text-sm text-docpilot-muted">
           <p className="font-medium text-docpilot-text">Expected API contract</p>
           <ul className="mt-3 space-y-2 leading-6">
-            <li><code>GET  /health</code> — liveness + version</li>
-            <li><code>POST /api/chat</code> — document-aware editing (SSE)</li>
-            <li><code>POST /api/documents/import</code> — DOCX/PDF → HTML</li>
-            <li><code>POST /api/documents/export</code> — HTML → DOCX</li>
-            <li><code>GET  /api/providers</code> — available providers</li>
+            <li className="flex items-start gap-2"><Waypoints size={14} className="mt-1 shrink-0" /> <span>GET /health or /api/health for liveness and version.</span></li>
+            <li className="flex items-start gap-2"><Waypoints size={14} className="mt-1 shrink-0" /> <span>POST /api/agent/turn and /api/agent/turn/stream for assistant turns.</span></li>
+            <li className="flex items-start gap-2"><Waypoints size={14} className="mt-1 shrink-0" /> <span>GET /api/agent/sessions/:id and /projection for canonical document refresh.</span></li>
+            <li className="flex items-start gap-2"><Waypoints size={14} className="mt-1 shrink-0" /> <span>POST /api/agent/revisions/:id/apply, reject, and rollback for mutation control.</span></li>
+            <li className="flex items-start gap-2"><Waypoints size={14} className="mt-1 shrink-0" /> <span>POST /api/documents/import and /api/documents/export for DOCX session I/O.</span></li>
           </ul>
         </div>
       </div>
     </div>
   );
 }
-
-// Re-export type import for inline use
-type AppSettings = import("@/app/types").AppSettings;

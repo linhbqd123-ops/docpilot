@@ -15,11 +15,35 @@ services:
       # Server
       DOC_MCP_PORT: 8080
       # Storage paths (inside container — backed by volumes below)
+      DOC_MCP_DATA_DIR: /app/data
       UPLOAD_DIR: /app/data/uploads
       REGISTRY_DIR: /app/data/registries
       SESSIONS_DIR: /app/data/sessions
       REVISIONS_DIR: /app/data/revisions
+      LEGACY_ARCHIVE_DIR: /app/data/legacy-archive
+      SQLITE_PATH: /app/data/sqlite/doc-mcp.db
+      SQLITE_POOL_SIZE: 4
+      SQLITE_BUSY_TIMEOUT_MS: 5000
+      SQLITE_MMAP_SIZE_BYTES: 268435456
+      SQLITE_CACHE_SIZE_KB: 32768
+      SQLITE_WAL_AUTOCHECKPOINT_PAGES: 1000
+      SQLITE_JOURNAL_SIZE_LIMIT_BYTES: 67108864
+      SQLITE_MIGRATE_LEGACY_JSON: "true"
+      SQLITE_ARCHIVE_LEGACY_JSON: "true"
+      SQLITE_OPTIMIZE_ON_STARTUP: "true"
       LOG_FILE: /app/logs/doc-mcp.log
+      PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-disabled}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-docpilot_personalization}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
+      EMBEDDING_API_URL: ${EMBEDDING_API_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      PERSONALIZATION_REQUEST_TIMEOUT_MS: ${PERSONALIZATION_REQUEST_TIMEOUT_MS:-15000}
+      PERSONALIZATION_MAX_SEARCH_RESULTS: ${PERSONALIZATION_MAX_SEARCH_RESULTS:-8}
+      PERSONALIZATION_MAX_INDEXED_CHARS: ${PERSONALIZATION_MAX_INDEXED_CHARS:-1200}
       # Processing limits
       MAX_FILE_SIZE: 100MB
       MAX_REQUEST_SIZE: 110MB
@@ -36,6 +60,8 @@ services:
       - doc_registries:/app/data/registries
       - doc_sessions:/app/data/sessions
       - doc_revisions:/app/data/revisions
+      - doc_sqlite:/app/data/sqlite
+      - doc_legacy_archive:/app/data/legacy-archive
       - doc_logs:/app/logs
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q 'UP' || exit 1"]
@@ -43,6 +69,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 45s
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    container_name: docpilot-qdrant
+    restart: unless-stopped
+    profiles: ["personalization"]
+    command: ["./qdrant", "--config-path", "/qdrant/config/local.yaml"]
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./packaging/qdrant/config.local.yaml:/qdrant/config/local.yaml:ro
 
 volumes:
   doc_uploads:
@@ -53,5 +92,11 @@ volumes:
     driver: local
   doc_revisions:
     driver: local
+  doc_sqlite:
+    driver: local
+  doc_legacy_archive:
+    driver: local
   doc_logs:
+    driver: local
+  qdrant_storage:
     driver: local

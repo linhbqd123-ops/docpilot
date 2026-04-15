@@ -44,7 +44,7 @@ export function AppLayout() {
             icon={<GitCompareArrows size={20} />}
             label="Review"
             active={state.activeSidebarView === "review"}
-            indicator={Boolean(selectedDocument?.pendingHtml)}
+            indicator={Boolean(selectedDocument?.pendingRevisionId)}
             onClick={() => setActiveSidebarView("review")}
           />
           <div className="flex-1" />

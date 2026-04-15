@@ -200,7 +200,6 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
 
                             {editingProvider === providerInfo.provider && (
                                 <KeyEditorDialog
-                                    provider={providerInfo.provider}
                                     label={providerInfo.label}
                                     currentMaskedKey={maskedKey}
                                     isOpen={true}

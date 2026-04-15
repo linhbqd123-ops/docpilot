@@ -1,41 +1,29 @@
 """Chat history management endpoints."""
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from datetime import datetime
-import json
-import os
-from pathlib import Path
+from __future__ import annotations
+
+from functools import lru_cache
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from config import settings
+from services.chat_store import SQLiteChatStore
 
 router = APIRouter()
 
-# Chat data persisted as JSON file (since this is single-user offline app)
-CHATS_FILE = Path(__file__).resolve().parent.parent / "data" / "chats.json"
 
-
-def _ensure_chats_file():
-    """Ensure chats.json exists."""
-    CHATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not CHATS_FILE.exists():
-        CHATS_FILE.write_text(json.dumps([]))
-
-
-def _load_chats() -> list[dict]:
-    """Load all chats from file."""
-    _ensure_chats_file()
-    try:
-        return json.loads(CHATS_FILE.read_text())
-    except Exception:
-        return []
-
-
-def _save_chats(chats: list[dict]) -> None:
-    """Save chats to file."""
-    _ensure_chats_file()
-    CHATS_FILE.write_text(json.dumps(chats, indent=2, ensure_ascii=False))
+@lru_cache(maxsize=1)
+def get_chat_store() -> SQLiteChatStore:
+    return SQLiteChatStore(
+        settings.chat_database_path,
+        legacy_json_path=settings.legacy_chats_path,
+    )
 
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     id: str
     role: str  # "user" | "assistant" | "system" | "error"
     content: str
@@ -44,91 +32,76 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
     name: str
     documentId: str
-    messages: list[ChatMessage] = []
+    messages: list[ChatMessage] = Field(default_factory=list)
 
 
 class ChatUpdate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     name: str | None = None
     messages: list[ChatMessage] | None = None
 
 
 @router.get("/chats")
-async def list_chats():
+async def list_chats(store: SQLiteChatStore = Depends(get_chat_store)):
     """Get all saved chats."""
-    chats = _load_chats()
-    return {"chats": chats}
+    return {"chats": store.list_chats()}
 
 
 @router.get("/chats/{chat_id}")
-async def get_chat(chat_id: str):
+async def get_chat(chat_id: str, store: SQLiteChatStore = Depends(get_chat_store)):
     """Get a specific chat by ID."""
-    chats = _load_chats()
-    chat = next((c for c in chats if c["id"] == chat_id), None)
+    chat = store.get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return {"chat": chat}
 
 
 @router.post("/chats")
-async def create_chat(body: ChatRequest):
-    """Create a new chat."""
+async def create_chat(body: ChatRequest, store: SQLiteChatStore = Depends(get_chat_store)):
+    """Create or replace a chat snapshot using a stable client id."""
     import uuid
-    from time import time
 
-    chats = _load_chats()
-    
-    new_chat = {
-        "id": str(uuid.uuid4()),
-        "name": body.name,
-        "documentId": body.documentId,
-        "messages": [m.model_dump() for m in body.messages],
-        "createdAt": int(time() * 1000),
-        "updatedAt": int(time() * 1000),
-    }
-    
-    chats.append(new_chat)
-    _save_chats(chats)
-    
-    return {"chat": new_chat}
+    saved = store.create_or_replace_chat(
+        chat_id=body.id or str(uuid.uuid4()),
+        name=body.name,
+        document_id=body.documentId,
+        messages=[message.model_dump() for message in body.messages],
+    )
+    return {"chat": saved}
 
 
 @router.put("/chats/{chat_id}")
-async def update_chat(chat_id: str, body: ChatUpdate):
+async def update_chat(
+    chat_id: str,
+    body: ChatUpdate,
+    store: SQLiteChatStore = Depends(get_chat_store),
+):
     """Update chat name or messages."""
-    from time import time
-
-    chats = _load_chats()
-    chat_idx = next((i for i, c in enumerate(chats) if c["id"] == chat_id), None)
-    
-    if chat_idx is None:
+    chat = store.update_chat(
+        chat_id=chat_id,
+        name=body.name,
+        messages=[message.model_dump() for message in body.messages] if body.messages is not None else None,
+    )
+    if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
-    if body.name is not None:
-        chats[chat_idx]["name"] = body.name
-    
-    if body.messages is not None:
-        chats[chat_idx]["messages"] = [m.model_dump() for m in body.messages]
-    
-    chats[chat_idx]["updatedAt"] = int(time() * 1000)
-    _save_chats(chats)
-    
-    return {"chat": chats[chat_idx]}
+    return {"chat": chat}
 
 
 @router.delete("/chats/{chat_id}")
-async def delete_chat(chat_id: str):
+async def delete_chat(chat_id: str, store: SQLiteChatStore = Depends(get_chat_store)):
     """Delete a chat."""
-    chats = _load_chats()
-    chats = [c for c in chats if c["id"] != chat_id]
-    _save_chats(chats)
-    
+    store.delete_chat(chat_id)
     return {"ok": True}
 
 
 @router.delete("/chats")
-async def delete_all_chats():
+async def delete_all_chats(store: SQLiteChatStore = Depends(get_chat_store)):
     """Delete all chats (for debugging/reset)."""
-    _save_chats([])
+    store.delete_all_chats()
     return {"ok": True}

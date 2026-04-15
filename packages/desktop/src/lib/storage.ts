@@ -15,7 +15,10 @@ export function loadPersistedState(): Partial<PersistedState> {
 
     return {
       ...parsed,
-      documents: parsed.documents.map(rehydrateDocument),
+      documents: (parsed.documents ?? []).map(rehydrateDocument),
+      chats: parsed.chats ?? [],
+      selectedChatId: parsed.selectedChatId ?? null,
+      messageThreads: parsed.messageThreads ?? {},
     };
   } catch {
     return {};
@@ -26,6 +29,8 @@ export function savePersistedState(state: AppState) {
   const payload: PersistedState = {
     documents: state.documents,
     selectedDocumentId: state.selectedDocumentId,
+    chats: state.chats,
+    selectedChatId: state.selectedChatId,
     messageThreads: state.messageThreads,
     settings: {
       ...state.settings,

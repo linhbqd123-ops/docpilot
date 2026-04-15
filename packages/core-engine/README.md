@@ -1,16 +1,56 @@
 # DocPilot Core Engine
 
+`core-engine` is the FastAPI layer that the UI talks to directly. It brokers LLM providers, chat/session workflows, document import/export orchestration, and encrypted API key handling.
+
+## Responsibilities
+
+- Expose REST endpoints for chat, agent turns, document import/export, health, and key storage.
+- Route model requests to providers such as Ollama, OpenAI, Anthropic, Groq, Azure OpenAI, and other OpenAI-compatible endpoints.
+- Call `doc-mcp` for canonical document operations.
+- Persist chat state locally.
+
+## Run locally
+
+Requirements:
+
+- Python 3.11+
+
+```powershell
+cd packages/core-engine
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env
+uvicorn main:app --reload --port 8000
+```
+
+Interactive docs are available at `http://localhost:8000/docs`.
+
+## Important configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOC_MCP_URL` | `http://localhost:8080` | Java document engine base URL |
+| `CHAT_DATABASE_PATH` | `./data/docpilot.db` | Local chat SQLite file |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Upstream request timeout |
+
+Provider-specific keys and defaults live in `.env.example`.
+
+## Notes about Qdrant
+
+Qdrant is not integrated directly into `core-engine`. Semantic indexing and retrieval stay inside `doc-mcp`, because that is where the canonical document tree and revision lifecycle live.# DocPilot Core Engine
+
 Python FastAPI service that acts as the **AI gateway** for the DocPilot desktop app.
 
-- Exposes `/api/chat` (SSE streaming) for the frontend
-- Proxies document conversion to the Java doc-processor (internal, port 8080)
+- Exposes the MCP-backed `/api/agent/*` contract for ask / review / apply flows
+- Proxies document-session operations to the Java doc-mcp service (internal, port 8080)
 - Supports Ollama (default), OpenAI, Anthropic, and Azure OpenAI providers
 
 ## Requirements
 
 - Python 3.11+
 - [Ollama](https://ollama.com) running locally (for the default local LLM)
-- Java doc-processor running on port 8080
+- Java doc-mcp service running on port 8080
 
 ## Setup
 
@@ -48,23 +88,38 @@ ollama pull mistral           # alternative
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| POST | `/api/chat` | AI chat with SSE streaming |
-| POST | `/api/documents/import` | Convert DOCX/PDF → HTML (via Java) |
-| POST | `/api/documents/export` | Convert HTML → DOCX (via Java) |
+| POST | `/api/agent/turn` | Phase 1 turn contract (JSON response) |
+| POST | `/api/agent/turn/stream` | Phase 1 turn contract (SSE events) |
+| GET | `/api/agent/sessions/{id}` | Session summary + revision list |
+| GET | `/api/agent/sessions/{id}/projection` | Current projected HTML for the session |
+| GET | `/api/agent/sessions/{id}/revisions` | Revision list for a session |
+| GET | `/api/agent/revisions/{id}` | Revision details, including pending-review payload when relevant |
+| POST | `/api/agent/revisions/{id}/apply` | Apply a staged revision and return refreshed HTML |
+| POST | `/api/agent/revisions/{id}/reject` | Reject a staged revision |
+| POST | `/api/agent/revisions/{id}/rollback` | Roll back the current applied revision |
+| POST | `/api/agent/revisions/compare` | Compare two applied revisions |
+| POST | `/api/documents/import` | Import DOCX/PDF through doc-mcp |
+| POST | `/api/documents/export` | Export DOCX from a document session |
 
 See **http://localhost:8000/docs** for interactive Swagger UI.
 
-## SSE event format (`/api/chat`)
+## SSE event format (`/api/agent/turn/stream`)
 
 ```
-data: {"delta": "streaming text chunk"}\n\n
-data: {"documentHtml": "<updated doc HTML>"}\n\n   ← only when doc changed
-data: [DONE]\n\n
+event: tool_started
+data: {"tool": "inspect_document", ...}
+
+event: assistant_delta
+data: "assistant chunk"
+
+event: done
+data: {"message": "...", "revisionId": "rev_...", "proposal": {...}, "review": {...}}
 ```
 
 Error:
 ```
-data: {"notices": ["Error: ..."]}
+event: notice
+data: {"message": "Error: ..."}
 ```
 
 ## Environment variables
@@ -73,8 +128,15 @@ See `.env.example` for all options. Key ones:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOC_PROCESSOR_URL` | `http://localhost:8080` | Java service URL |
+| `DOC_MCP_URL` | `http://localhost:8080` | Java doc-mcp service URL |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Model to use |
 | `OPENAI_API_KEY` | *(empty)* | Required for OpenAI provider |
 | `ANTHROPIC_API_KEY` | *(empty)* | Required for Anthropic provider |
+
+## Frontend integration notes
+
+- Imported DOCX files now return `documentSessionId` and should be treated as canonical session-backed documents.
+- Ask / agent chat should use `/api/agent/turn` or `/api/agent/turn/stream`; `/api/chat` has been removed.
+- Review UI should use the `/api/agent/revisions/*` endpoints instead of staging raw HTML diffs in the client.
+- Export requires `documentSessionId`; raw HTML export is no longer supported.

@@ -7,7 +7,7 @@ import lombok.extern.jackson.Jacksonized;
 
 /** Layout / formatting properties for a component. */
 @Value
-@Builder
+@Builder(toBuilder = true)
 @Jacksonized
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class LayoutProps {

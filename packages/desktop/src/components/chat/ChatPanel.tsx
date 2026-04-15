@@ -1,4 +1,4 @@
-import { Bot, LoaderCircle, Send, Square, User, RotateCcw, Plus, X } from "lucide-react";
+import { Bot, LoaderCircle, Plus, RotateCcw, Send, Square, User, X } from "lucide-react";
 
 import { useAppContext } from "@/app/context";
 import { cn, formatRelativeTime } from "@/lib/utils";
@@ -24,6 +24,7 @@ export function ChatPanel() {
   const {
     state,
     selectedDocument,
+    currentMessages,
     updateComposer,
     sendMessage,
     cancelRequest,
@@ -38,11 +39,6 @@ export function ChatPanel() {
   const [isResizing, setIsResizing] = useState(false);
   const dividerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  const messageChatId = state.selectedChatId || selectedDocument?.id;
-  const currentMessages = messageChatId
-    ? state.messageThreads[messageChatId] ?? []
-    : [];
 
   const documentChats = selectedDocument
     ? state.chats.filter((chat) => chat.documentId === selectedDocument.id)
@@ -79,6 +75,7 @@ export function ChatPanel() {
   const canSend =
     Boolean(selectedDocument) &&
     selectedDocument?.status === "ready" &&
+    Boolean(selectedDocument?.documentSessionId) &&
     Boolean(state.settings.apiBaseUrl.trim()) &&
     Boolean(state.composerValue.trim()) &&
     !state.isSending;
@@ -87,6 +84,8 @@ export function ChatPanel() {
     ? "Select or import a document to start an editing session."
     : selectedDocument.status !== "ready"
       ? "This document needs the backend import endpoint before DocPilot can edit it."
+      : !selectedDocument.documentSessionId
+        ? "This document can be edited locally, but AI review/apply requires a session-backed DOCX import."
       : !state.settings.apiBaseUrl.trim()
         ? "Set the backend URL in Connect before sending requests."
         : "Send an instruction to the backend. Responses can stream into this panel."
@@ -102,14 +101,24 @@ export function ChatPanel() {
           </div>
           <div className="flex items-center gap-3">
             {selectedDocument ? (
-              <button
-                type="button"
-                className="action-button"
-                onClick={() => createNewChat()}
-                title="Create a new chat for this document"
-              >
-                <Plus size={14} /> New Chat
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="action-button"
+                  onClick={() => clearChat()}
+                  title="Clear the current thread"
+                >
+                  <RotateCcw size={14} /> Clear
+                </button>
+                <button
+                  type="button"
+                  className="action-button"
+                  onClick={() => createNewChat()}
+                  title="Create a new chat for this document"
+                >
+                  <Plus size={14} /> New Chat
+                </button>
+              </>
             ) : null}
             <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
               <span
@@ -182,8 +191,9 @@ export function ChatPanel() {
           <div className="panel-card space-y-3 p-4 text-sm text-docpilot-muted">
             <p className="font-medium text-docpilot-text">No conversation yet</p>
             <p>
-              The current document is ready in the workspace. Ask for rewriting, outlining, translation, formatting,
-              or structure-aware edits.
+              {selectedDocument.documentSessionId
+                ? "The current canonical document session is ready. Ask for rewriting, outlining, translation, formatting, or structure-aware edits."
+                : "The current document is open locally. You can edit it in the workspace now, or import a DOCX through the backend to enable structured AI revisions."}
             </p>
           </div>
         ) : null}

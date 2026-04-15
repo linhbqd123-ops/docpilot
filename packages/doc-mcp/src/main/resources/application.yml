@@ -25,10 +25,36 @@ spring:
 # ── DocPilot custom properties ───────────────────────────────────────────────
 docpilot:
   storage:
-    upload-dir: ${UPLOAD_DIR:./data/uploads}
-    registry-dir: ${REGISTRY_DIR:./data/registries}
-    sessions-dir: ${SESSIONS_DIR:./data/sessions}
-    revisions-dir: ${REVISIONS_DIR:./data/revisions}
+    data-dir: ${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}
+    upload-dir: ${UPLOAD_DIR:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/uploads}
+    registry-dir: ${REGISTRY_DIR:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/legacy-json/registries}
+    sessions-dir: ${SESSIONS_DIR:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/legacy-json/sessions}
+    revisions-dir: ${REVISIONS_DIR:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/legacy-json/revisions}
+    legacy-archive-dir: ${LEGACY_ARCHIVE_DIR:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/legacy-archive}
+  persistence:
+    sqlite-path: ${SQLITE_PATH:${DOC_MCP_DATA_DIR:${user.home}/.docpilot/doc-mcp}/doc-mcp.db}
+    pool-size: ${SQLITE_POOL_SIZE:4}
+    busy-timeout-ms: ${SQLITE_BUSY_TIMEOUT_MS:5000}
+    mmap-size-bytes: ${SQLITE_MMAP_SIZE_BYTES:268435456}
+    cache-size-kb: ${SQLITE_CACHE_SIZE_KB:32768}
+    wal-autocheckpoint-pages: ${SQLITE_WAL_AUTOCHECKPOINT_PAGES:1000}
+    journal-size-limit-bytes: ${SQLITE_JOURNAL_SIZE_LIMIT_BYTES:67108864}
+    migrate-legacy-json-on-startup: ${SQLITE_MIGRATE_LEGACY_JSON:true}
+    archive-legacy-json: ${SQLITE_ARCHIVE_LEGACY_JSON:true}
+    optimize-on-startup: ${SQLITE_OPTIMIZE_ON_STARTUP:true}
+  personalization:
+    provider: ${PERSONALIZATION_PROVIDER:disabled}
+    qdrant-url: ${QDRANT_URL:http://127.0.0.1:6333}
+    qdrant-collection: ${QDRANT_COLLECTION:docpilot_personalization}
+    embedding-dimensions: ${EMBEDDING_DIMENSIONS:1536}
+    qdrant-api-key: ${QDRANT_API_KEY:}
+    embedding-provider: ${EMBEDDING_PROVIDER:hashing}
+    embedding-api-url: ${EMBEDDING_API_URL:}
+    embedding-model: ${EMBEDDING_MODEL:}
+    embedding-api-key: ${EMBEDDING_API_KEY:}
+    request-timeout-ms: ${PERSONALIZATION_REQUEST_TIMEOUT_MS:15000}
+    max-search-results: ${PERSONALIZATION_MAX_SEARCH_RESULTS:8}
+    max-indexed-chars: ${PERSONALIZATION_MAX_INDEXED_CHARS:1200}
   processing:
     max-file-size-bytes: ${MAX_FILE_SIZE_BYTES:104857600}
     embed-images-in-html: ${EMBED_IMAGES:true}

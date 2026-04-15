@@ -15,7 +15,7 @@ import java.time.Instant;
  * traversed to roll back to any previous state.
  */
 @Value
-@Builder
+@Builder(toBuilder = true)
 @Jacksonized
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class Revision {
