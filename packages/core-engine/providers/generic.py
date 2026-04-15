@@ -22,11 +22,6 @@ class GenericOpenAIProvider(BaseProvider):
         default_model: str,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
-        # chuẩn hóa base_url
-        clean_url = base_url.rstrip("/")
-        # log ra console
-        print(f"[Init] AsyncOpenAI client base_url = {clean_url}")
-        print(f"[Init] AsyncOpenAI client api_key = {api_key if api_key else 'None'}")
         self.client = AsyncOpenAI(
             base_url=base_url.rstrip("/"),
             api_key=api_key,

@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  doc-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: docpilot/doc-mcp:latest
+    container_name: docpilot-doc-mcp
+    restart: unless-stopped
+    ports:
+      - "${DOC_MCP_PORT:-8080}:8080"
+    environment:
+      # Server
+      DOC_MCP_PORT: 8080
+      # Storage paths (inside container — backed by volumes below)
+      UPLOAD_DIR: /app/data/uploads
+      REGISTRY_DIR: /app/data/registries
+      SESSIONS_DIR: /app/data/sessions
+      REVISIONS_DIR: /app/data/revisions
+      LOG_FILE: /app/logs/doc-mcp.log
+      # Processing limits
+      MAX_FILE_SIZE: 100MB
+      MAX_REQUEST_SIZE: 110MB
+      MAX_FILE_SIZE_BYTES: 104857600
+      EMBED_IMAGES: "true"
+      # MCP
+      MCP_SERVER_NAME: "DocPilot MCP"
+      MCP_SERVER_VERSION: "2.0.0"
+      MCP_PROTOCOL_VERSION: "2024-11-05"
+      # JVM tuning
+      JAVA_OPTS: "-Xms256m -Xmx1g"
+    volumes:
+      - doc_uploads:/app/data/uploads
+      - doc_registries:/app/data/registries
+      - doc_sessions:/app/data/sessions
+      - doc_revisions:/app/data/revisions
+      - doc_logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q 'UP' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+volumes:
+  doc_uploads:
+    driver: local
+  doc_registries:
+    driver: local
+  doc_sessions:
+    driver: local
+  doc_revisions:
+    driver: local
+  doc_logs:
+    driver: local

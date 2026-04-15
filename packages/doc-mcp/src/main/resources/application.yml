@@ -1,0 +1,56 @@
+server:
+  port: ${DOC_MCP_PORT:8080}
+  shutdown: graceful
+  tomcat:
+    max-swallow-size: -1
+
+spring:
+  application:
+    name: doc-mcp
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: ${MAX_FILE_SIZE:100MB}
+      max-request-size: ${MAX_REQUEST_SIZE:110MB}
+      file-size-threshold: 2MB
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+
+# ── DocPilot custom properties ───────────────────────────────────────────────
+docpilot:
+  storage:
+    upload-dir: ${UPLOAD_DIR:./data/uploads}
+    registry-dir: ${REGISTRY_DIR:./data/registries}
+    sessions-dir: ${SESSIONS_DIR:./data/sessions}
+    revisions-dir: ${REVISIONS_DIR:./data/revisions}
+  processing:
+    max-file-size-bytes: ${MAX_FILE_SIZE_BYTES:104857600}
+    embed-images-in-html: ${EMBED_IMAGES:true}
+  mcp:
+    server-name: doc-mcp
+    server-version: 2.0.0
+    protocol-version: "2024-11-05"
+
+# ── Actuator ────────────────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: DocPilot Doc MCP
+    version: 2.0.0
