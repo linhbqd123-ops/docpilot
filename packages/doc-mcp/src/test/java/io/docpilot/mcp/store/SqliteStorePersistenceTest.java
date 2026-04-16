@@ -4,15 +4,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariDataSource;
 import io.docpilot.mcp.config.AppConfig;
 import io.docpilot.mcp.config.AppProperties;
+import io.docpilot.mcp.converter.AnalysisHtmlConverter;
+import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
+import io.docpilot.mcp.engine.patch.PatchEngine;
+import io.docpilot.mcp.engine.revision.RevisionService;
 import io.docpilot.mcp.model.document.ComponentType;
 import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.legacy.StyleRegistry;
 import io.docpilot.mcp.model.patch.Patch;
+import io.docpilot.mcp.model.patch.PatchValidation;
 import io.docpilot.mcp.model.revision.ConflictRevision;
 import io.docpilot.mcp.model.revision.Revision;
 import io.docpilot.mcp.model.revision.RevisionStatus;
 import io.docpilot.mcp.model.session.DocumentSession;
 import io.docpilot.mcp.model.session.SessionState;
+import io.docpilot.mcp.personalization.SemanticSearchMatch;
+import io.docpilot.mcp.personalization.SemanticSearchService;
 import io.docpilot.mcp.storage.RegistryStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -111,6 +118,33 @@ class SqliteStorePersistenceTest {
 
             assertTrue(context.sessionStore.find("session-delete").isEmpty());
             assertFalse(context.sessionStore.findDocxSnapshot("session-delete").isPresent());
+        }
+    }
+
+    @Test
+    void stagingRevisionPersistsPatchBeforeRevisionInSqlite() throws Exception {
+        AppProperties props = props(tempDir, false, false);
+
+        try (StoreContext context = new StoreContext(props)) {
+            DocumentSession session = session("session-stage", "doc-stage", null);
+            context.sessionStore.save(session);
+
+            RevisionService revisionService = new RevisionService(
+                new AcceptingPatchEngine(),
+                context.revisionStore,
+                context.sessionStore,
+                new NoOpSemanticSearchService(),
+                new FidelityHtmlService(),
+                new AnalysisHtmlConverter()
+            );
+
+            Patch patch = patch("patch-stage", "session-stage", null);
+            Revision staged = revisionService.stage(patch, session, "agent");
+
+            assertEquals("patch-stage", context.revisionStore.findPatch("patch-stage").orElseThrow().getPatchId());
+            assertEquals(staged.getRevisionId(), context.revisionStore.findRevision(staged.getRevisionId()).orElseThrow().getRevisionId());
+            assertEquals(RevisionStatus.PENDING, staged.getStatus());
+            assertEquals(1, context.revisionStore.findBySession("session-stage").size());
         }
     }
 
@@ -261,6 +295,46 @@ class SqliteStorePersistenceTest {
         @Override
         public void close() {
             dataSource.close();
+        }
+    }
+
+    private static final class AcceptingPatchEngine extends PatchEngine {
+        private AcceptingPatchEngine() {
+            super(null, null);
+        }
+
+        @Override
+        public PatchValidation dryRun(Patch patch, DocumentSession session) {
+            return PatchValidation.builder()
+                .structureOk(true)
+                .styleOk(true)
+                .errors(List.of())
+                .warnings(List.of())
+                .affectedBlockIds(List.of())
+                .scope("minor")
+                .build();
+        }
+    }
+
+    private static final class NoOpSemanticSearchService implements SemanticSearchService {
+        @Override
+        public boolean isEnabled() {
+            return false;
+        }
+
+        @Override
+        public String providerName() {
+            return "test";
+        }
+
+        @Override
+        public void reindexSession(DocumentSession session) {
+            // no-op for persistence testing
+        }
+
+        @Override
+        public List<SemanticSearchMatch> search(DocumentSession session, String query, int limit) {
+            return List.of();
         }
     }
 }

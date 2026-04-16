@@ -18,6 +18,7 @@ class Settings(BaseSettings):
         "groq_api_key",
         "openrouter_api_key",
         "together_api_key",
+        "nvidia_api_key",
         "zai_api_key",
         "anthropic_api_key",
         "azure_openai_api_key",
@@ -69,6 +70,11 @@ class Settings(BaseSettings):
     together_api_key: str = ""
     together_base_url: str = "https://api.together.xyz/v1"
     together_default_model: str = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+
+    # ── NVIDIA NIM / Integrate API ───────────────────────────────────────────
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_default_model: str = "meta/llama-3.1-70b-instruct"
 
     # ── z.ai ────────────────────────────────────────────────────────────────
     zai_api_key: str = ""

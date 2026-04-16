@@ -6,7 +6,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from services.sqlite_utils import initialize_sqlite, sqlite_connection
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +140,7 @@ class SQLiteChatStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self.database_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as connection:
+            def initialize_schema(connection: sqlite3.Connection) -> None:
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS chats (
@@ -181,16 +182,12 @@ class SQLiteChatStore:
                 )
                 connection.execute("PRAGMA user_version = 1")
 
+            initialize_sqlite(self.database_path, initialize_schema)
+
             self._migrate_legacy_json_if_needed()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        return sqlite_connection(self.database_path)
 
     def _migrate_legacy_json_if_needed(self) -> None:
         legacy_path = self.legacy_json_path

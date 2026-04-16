@@ -22,7 +22,7 @@ export function DocumentWorkspace() {
           <h2 className="mt-3 font-display text-4xl text-docpilot-textStrong">Document-native AI editing starts here</h2>
           <p className="mt-4 text-base leading-8 text-docpilot-muted">
             Import a document from the Library panel to open the editor surface. Local HTML, Markdown, and TXT files
-            can be edited directly. DOCX imports stay canonical and revision-backed through the MCP session flow.
+            can be edited directly. DOCX imports stay fidelity-backed and revision-backed through the MCP session flow.
           </p>
         </div>
       </div>
@@ -32,6 +32,7 @@ export function DocumentWorkspace() {
   const isSessionBacked = Boolean(selectedDocument.documentSessionId);
   const hasPendingRevision = Boolean(selectedDocument.pendingRevisionId);
   const isEditable = selectedDocument.status === "ready" && !isSessionBacked;
+  const isFidelitySurface = isSessionBacked && Boolean(selectedDocument.sourceHtml);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-gradient-to-b from-transparent to-docpilot-panelAlt">
@@ -47,7 +48,9 @@ export function DocumentWorkspace() {
             <p className="mt-1 text-sm text-docpilot-muted">
               {selectedDocument.wordCount} words
               {isSessionBacked
-                ? " · canonical projection from the active document session"
+                ? isFidelitySurface
+                  ? " · fidelity-backed DOCX surface mirrored from the active session"
+                  : " · session-backed document surface"
                 : " · direct manual edits are autosaved on blur"}
             </p>
           </div>
@@ -100,7 +103,7 @@ export function DocumentWorkspace() {
             <div className="flex flex-wrap items-center gap-4">
               <span className="inline-flex items-center gap-2">
                 {isSessionBacked ? <Lock size={14} /> : <RefreshCw size={14} />}
-                {isSessionBacked ? "read-only canonical projection" : "autosave on blur"}
+                {isSessionBacked ? "read-only DOCX fidelity surface" : "autosave on blur"}
               </span>
               {hasPendingRevision ? (
                 <span className="inline-flex items-center gap-2 text-docpilot-warning">
@@ -118,6 +121,7 @@ export function DocumentWorkspace() {
             <DocumentCanvas
               html={selectedDocument.html}
               editable={isEditable}
+              variant={isSessionBacked ? "fidelity" : "editable"}
               onCommit={updateSelectedDocumentHtml}
             />
           </div>

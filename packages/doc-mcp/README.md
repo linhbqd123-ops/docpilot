@@ -36,6 +36,7 @@ java -jar target/doc-mcp-*.jar
 | `EMBEDDING_API_URL` | empty | Required for `openai-compatible` |
 | `EMBEDDING_MODEL` | empty | Required for `openai-compatible` |
 | `EMBEDDING_API_KEY` | empty | Optional bearer auth |
+| `LOG_FILE` | `debug/doc-mcp.log` | File path for detailed request and MCP traces |
 
 ## Qdrant behavior
 
@@ -48,6 +49,14 @@ When `PERSONALIZATION_PROVIDER=qdrant`:
 - AI-facing tools consume semantic results before lexical fallback.
 
 The default embedding mode is `hashing`, which keeps local development offline and deterministic. Switch to `openai-compatible` if you want higher-quality embeddings from an external endpoint.
+
+## Debug traces
+
+`doc-mcp` now writes detailed HTTP and MCP traces to `packages/doc-mcp/debug/doc-mcp.log` by default.
+
+- Every inbound request records method, path, headers, request body, response body, and latency.
+- The log format includes `X-DocPilot-Trace-Id`, so one chat turn can be correlated with the desktop and core-engine debug files.
+- Set `LOG_FILE` if you want the trace file written somewhere else.
 
 ## Docker with Qdrant
 

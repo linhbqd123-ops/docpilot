@@ -22,6 +22,7 @@ ProviderName = Literal[
     "groq",
     "openrouter",
     "together",
+    "nvidia",
     "zai",
     "anthropic",
     "azure",
@@ -41,6 +42,8 @@ def _get_provider_endpoint_env_name(provider: str) -> str:
         return "OPENROUTER_BASE_URL"
     elif provider == "together":
         return "TOGETHER_BASE_URL"
+    elif provider == "nvidia":
+        return "NVIDIA_BASE_URL"
     elif provider == "zai":
         return "ZAI_BASE_URL"
     elif provider == "anthropic":
@@ -76,6 +79,7 @@ class ProviderConfig:
             "GROQ_BASE_URL": settings.groq_base_url,
             "OPENROUTER_BASE_URL": settings.openrouter_base_url,
             "TOGETHER_BASE_URL": settings.together_base_url,
+            "NVIDIA_BASE_URL": settings.nvidia_base_url,
             "ZAI_BASE_URL": settings.zai_base_url,
             "ANTHROPIC_BASE_URL": settings.anthropic_base_url,
             "CUSTOM_BASE_URL": settings.custom_base_url,
@@ -99,6 +103,7 @@ class ProviderConfig:
                 "GROQ_API_KEY": settings.groq_api_key,
                 "OPENROUTER_API_KEY": settings.openrouter_api_key,
                 "TOGETHER_API_KEY": settings.together_api_key,
+                "NVIDIA_API_KEY": settings.nvidia_api_key,
                 "ZAI_API_KEY": settings.zai_api_key,
                 "ANTHROPIC_API_KEY": settings.anthropic_api_key,
                 "AZURE_OPENAI_API_KEY": settings.azure_openai_api_key,
@@ -116,6 +121,7 @@ class ProviderConfig:
                 "GROQ_DEFAULT_MODEL": settings.groq_default_model,
                 "OPENROUTER_DEFAULT_MODEL": settings.openrouter_default_model,
                 "TOGETHER_DEFAULT_MODEL": settings.together_default_model,
+                "NVIDIA_DEFAULT_MODEL": settings.nvidia_default_model,
                 "ZAI_DEFAULT_MODEL": settings.zai_default_model,
                 "ANTHROPIC_DEFAULT_MODEL": settings.anthropic_default_model,
                 "OLLAMA_DEFAULT_MODEL": settings.ollama_default_model,
@@ -175,6 +181,14 @@ REGISTRY: dict[str, ProviderConfig] = {
         default_model="meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
         default_model_env="TOGETHER_DEFAULT_MODEL",
     ),
+    "nvidia": ProviderConfig(
+        display_name="NVIDIA",
+        base_url="https://integrate.api.nvidia.com/v1",
+        base_url_env="NVIDIA_BASE_URL",
+        api_key_env="NVIDIA_API_KEY",
+        default_model="meta/llama-3.1-70b-instruct",
+        default_model_env="NVIDIA_DEFAULT_MODEL",
+    ),
     "zai": ProviderConfig(
         display_name="z.ai",
         base_url="https://api.z.ai/api/v1",
@@ -207,6 +221,18 @@ REGISTRY: dict[str, ProviderConfig] = {
     ),
 }
 
+def _attach_provider_metadata(
+    provider: BaseProvider,
+    *,
+    provider_name: ProviderName,
+    display_name: str,
+    resolved_model: str | None,
+) -> BaseProvider:
+    setattr(provider, "provider_name", provider_name)
+    setattr(provider, "provider_display_name", display_name)
+    setattr(provider, "resolved_model", resolved_model or getattr(provider, "default_model", ""))
+    return provider
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -228,15 +254,29 @@ def get_provider(name: ProviderName, model_override: str | None = None) -> BaseP
 
     if cfg.kind == "anthropic":
         from providers.anthropic_prov import AnthropicProvider
-        return AnthropicProvider(
+        resolved_model = model_override or cfg.resolve_model()
+        provider = AnthropicProvider(
             api_key=cfg.resolve_api_key(),
-            default_model=model_override or cfg.resolve_model(),
+            default_model=resolved_model,
             base_url=cfg.resolve_base_url(name),
+        )
+        return _attach_provider_metadata(
+            provider,
+            provider_name=name,
+            display_name=cfg.display_name,
+            resolved_model=resolved_model,
         )
 
     if cfg.kind == "azure":
         from providers.azure_prov import AzureProvider
-        return AzureProvider(model_override=model_override)
+        resolved_model = model_override or settings.azure_openai_deployment
+        provider = AzureProvider(model_override=model_override)
+        return _attach_provider_metadata(
+            provider,
+            provider_name=name,
+            display_name=cfg.display_name,
+            resolved_model=resolved_model,
+        )
 
     # All other providers: generic OpenAI-compatible
     from providers.generic import GenericOpenAIProvider
@@ -246,11 +286,18 @@ def get_provider(name: ProviderName, model_override: str | None = None) -> BaseP
     if name == "ollama" and not base_url.rstrip("/").endswith("/v1"):
         base_url = base_url.rstrip("/") + "/v1"
 
-    return GenericOpenAIProvider(
+    resolved_model = model_override or cfg.resolve_model()
+    provider = GenericOpenAIProvider(
         base_url=base_url,
         api_key=cfg.resolve_api_key(),
-        default_model=model_override or cfg.resolve_model(),
+        default_model=resolved_model,
         extra_headers=cfg.extra_headers,
+    )
+    return _attach_provider_metadata(
+        provider,
+        provider_name=name,
+        display_name=cfg.display_name,
+        resolved_model=resolved_model,
     )
 
 

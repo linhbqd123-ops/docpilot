@@ -10,8 +10,7 @@ from config import settings
 from services.chat_store import SQLiteChatStore
 from services.doc_mcp_client import (
     DocMcpClient,
-    DocMcpResponseError,
-    DocMcpUnavailableError,
+    map_doc_mcp_error,
 )
 from services.document_store import SQLiteDocumentStore
 
@@ -69,6 +68,7 @@ class LibraryDocumentRequest(BaseModel):
     size: int = 0
     status: str = "ready"
     html: str = ""
+    sourceHtml: str | None = None
     outline: list[dict] = Field(default_factory=list)
     wordCount: int = 0
     createdAt: int
@@ -158,7 +158,7 @@ async def import_document(file: UploadFile = File(...)):
     try:
         if import_kind == "docx":
             session = await client.import_docx_session(filename, content, content_type)
-            html = await client.get_html_projection(session["session_id"], fragment=True)
+            html = session.get("source_html") or await client.get_source_html(session["session_id"])
             return {
                 "docId": session.get("doc_id"),
                 "documentSessionId": session.get("session_id"),
@@ -179,12 +179,11 @@ async def import_document(file: UploadFile = File(...)):
             "filename": filename,
         }
     except Exception as exc:  # noqa: BLE001
-        if isinstance(exc, DocMcpUnavailableError):
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        if isinstance(exc, DocMcpResponseError):
-            status_code = exc.status_code if exc.status_code in {400, 404, 409} else 502
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        raise HTTPException(status_code=502, detail=f"Doc-mcp import failed: {exc}") from exc
+        mapped = map_doc_mcp_error(
+            exc,
+            internal_message="Could not import the document right now. Please try again.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +210,11 @@ async def export_document(request: ExportRequest):
     try:
         docx_bytes = await client.export_session_docx(request.document_session_id)
     except Exception as exc:  # noqa: BLE001
-        if isinstance(exc, DocMcpUnavailableError):
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        if isinstance(exc, DocMcpResponseError):
-            status_code = exc.status_code if exc.status_code in {400, 404, 409} else 502
-            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-        raise HTTPException(status_code=502, detail=f"Doc-mcp export failed: {exc}") from exc
+        mapped = map_doc_mcp_error(
+            exc,
+            internal_message="Could not export the document right now. Please try again.",
+        )
+        raise HTTPException(status_code=mapped.status_code, detail=mapped.message) from exc
 
     filename = request.filename
     if not filename.lower().endswith(".docx"):

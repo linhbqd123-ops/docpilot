@@ -15,6 +15,9 @@ import type {
   ChatMessage,
   DocumentRecord,
   SidebarView,
+  ToolActivity,
+  TurnUsage,
+  TurnUsageRequest,
 } from "@/app/types";
 import { appReducer, createInitialState } from "@/app/reducer";
 import { getThemeDefinition } from "@/app/themes";
@@ -37,6 +40,7 @@ import {
   updateChat,
 } from "@/lib/api";
 import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
+import { getProviderDefinition } from "@/lib/providers";
 import { loadLegacyDocumentsSnapshot, loadPersistedState, savePersistedState } from "@/lib/storage";
 
 interface AppContextValue {
@@ -86,6 +90,161 @@ function formatNotices(notices?: AgentNotice[]) {
   });
 
   return parts.join(" ").trim();
+}
+
+function estimateTokenCount(text: string) {
+  const normalized = text.trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function estimateInputChars(history: ChatMessage[]) {
+  return history.reduce((total, message) => total + message.content.length, 0);
+}
+
+function estimateInputTokens(history: ChatMessage[]) {
+  return history.reduce((total, message) => total + estimateTokenCount(message.content), 0);
+}
+
+function resolveProviderTelemetry(settings: AppSettings) {
+  const providerDefinition = getProviderDefinition(settings.provider);
+  return {
+    provider: settings.provider,
+    providerDisplayName: providerDefinition?.label ?? settings.provider,
+    model: settings.modelOverride.trim() || providerDefinition?.defaultModel || null,
+  };
+}
+
+function inferPhase(toolActivity: ToolActivity[], mode: ChatMessage["mode"], resultType?: string) {
+  const llmActivity = [...toolActivity].reverse().find((activity) => activity.tool === "llm_inference");
+  const phase = typeof llmActivity?.phase === "string" ? llmActivity.phase : "";
+
+  if (phase) {
+    return phase;
+  }
+
+  if (mode === "agent" && resultType === "revision_staged") {
+    return "plan_revision";
+  }
+
+  return "compose_answer";
+}
+
+function hydrateTurnUsage(args: {
+  settings: AppSettings;
+  history: ChatMessage[];
+  assistantText: string;
+  toolActivity: ToolActivity[];
+  mode: ChatMessage["mode"];
+  resultType?: string;
+  usage?: TurnUsage;
+}): TurnUsage {
+  const { settings, history, assistantText, toolActivity, mode, resultType, usage } = args;
+  const providerTelemetry = resolveProviderTelemetry(settings);
+  const inputChars = estimateInputChars(history);
+  const estimatedInputTokens = estimateInputTokens(history);
+  const outputChars = assistantText.length;
+  const estimatedOutputTokens = estimateTokenCount(assistantText);
+  const phase = inferPhase(toolActivity, mode, resultType);
+
+  const fallbackRequest: TurnUsageRequest = {
+    requestIndex: 1,
+    phase,
+    provider: providerTelemetry.provider,
+    providerDisplayName: providerTelemetry.providerDisplayName,
+    model: providerTelemetry.model,
+    inputChars,
+    outputChars,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedTotalTokens: estimatedInputTokens + estimatedOutputTokens,
+  };
+
+  const requests = (usage?.requests?.length ? usage.requests : [fallbackRequest]).map((request, index) => {
+    const requestIndex = request.requestIndex || index + 1;
+    const nextInputChars = request.inputChars > 0 ? request.inputChars : inputChars;
+    const nextOutputChars = request.outputChars > 0 ? request.outputChars : outputChars;
+    const nextEstimatedInputTokens = request.estimatedInputTokens > 0 ? request.estimatedInputTokens : estimatedInputTokens;
+    const nextEstimatedOutputTokens = request.estimatedOutputTokens > 0 ? request.estimatedOutputTokens : estimatedOutputTokens;
+
+    return {
+      requestIndex,
+      phase: request.phase || phase,
+      provider: request.provider || providerTelemetry.provider,
+      providerDisplayName: request.providerDisplayName || providerTelemetry.providerDisplayName,
+      model: request.model || providerTelemetry.model,
+      inputChars: nextInputChars,
+      outputChars: nextOutputChars,
+      estimatedInputTokens: nextEstimatedInputTokens,
+      estimatedOutputTokens: nextEstimatedOutputTokens,
+      estimatedTotalTokens:
+        request.estimatedTotalTokens > 0
+          ? request.estimatedTotalTokens
+          : nextEstimatedInputTokens + nextEstimatedOutputTokens,
+    };
+  });
+
+  return {
+    requestCount: requests.length,
+    estimatedInputTokens: requests.reduce((total, request) => total + request.estimatedInputTokens, 0),
+    estimatedOutputTokens: requests.reduce((total, request) => total + request.estimatedOutputTokens, 0),
+    estimatedTotalTokens: requests.reduce((total, request) => total + request.estimatedTotalTokens, 0),
+    requests,
+  };
+}
+
+function hydrateToolActivityTelemetry(args: {
+  settings: AppSettings;
+  toolActivity: ToolActivity[];
+  usage?: TurnUsage;
+}): ToolActivity[] {
+  const { settings, toolActivity, usage } = args;
+  const providerTelemetry = resolveProviderTelemetry(settings);
+
+  return toolActivity.map((activity) => {
+    if (activity.tool !== "llm_inference") {
+      return activity;
+    }
+
+    const requestIndex = typeof activity.requestIndex === "number" && Number.isFinite(activity.requestIndex)
+      ? activity.requestIndex
+      : usage?.requests[0]?.requestIndex ?? 1;
+    const usageRequest = usage?.requests.find((request) => request.requestIndex === requestIndex) ?? usage?.requests[0];
+
+    return {
+      ...activity,
+      requestIndex,
+      provider: typeof activity.provider === "string" && activity.provider.trim() ? activity.provider : usageRequest?.provider ?? providerTelemetry.provider,
+      providerDisplayName:
+        typeof activity.providerDisplayName === "string" && activity.providerDisplayName.trim()
+          ? activity.providerDisplayName
+          : usageRequest?.providerDisplayName ?? providerTelemetry.providerDisplayName,
+      model: typeof activity.model === "string" && activity.model.trim() ? activity.model : usageRequest?.model ?? providerTelemetry.model,
+      inputChars:
+        typeof activity.inputChars === "number" && Number.isFinite(activity.inputChars)
+          ? activity.inputChars
+          : usageRequest?.inputChars,
+      outputChars:
+        typeof activity.outputChars === "number" && Number.isFinite(activity.outputChars)
+          ? activity.outputChars
+          : usageRequest?.outputChars,
+      estimatedInputTokens:
+        typeof activity.estimatedInputTokens === "number" && Number.isFinite(activity.estimatedInputTokens)
+          ? activity.estimatedInputTokens
+          : usageRequest?.estimatedInputTokens,
+      estimatedOutputTokens:
+        typeof activity.estimatedOutputTokens === "number" && Number.isFinite(activity.estimatedOutputTokens)
+          ? activity.estimatedOutputTokens
+          : usageRequest?.estimatedOutputTokens,
+      estimatedTotalTokens:
+        typeof activity.estimatedTotalTokens === "number" && Number.isFinite(activity.estimatedTotalTokens)
+          ? activity.estimatedTotalTokens
+          : usageRequest?.estimatedTotalTokens,
+    };
+  });
 }
 
 export function AppProvider({ children }: PropsWithChildren) {
@@ -321,12 +480,15 @@ export function AppProvider({ children }: PropsWithChildren) {
           return;
         }
 
-        if (payload.html) {
+        const refreshedHtml = payload.html ?? payload.sourceHtml ?? undefined;
+
+        if (refreshedHtml) {
           dispatch({
             type: "setDocumentProjection",
             payload: {
               documentId: selectedDocument.id,
-              html: payload.html,
+              html: refreshedHtml,
+              sourceHtml: payload.sourceHtml ?? payload.html ?? null,
               session: payload.session,
               revisions: payload.revisions,
             },
@@ -386,6 +548,7 @@ export function AppProvider({ children }: PropsWithChildren) {
               ...document,
               status: "ready",
               html: normalized.html,
+              sourceHtml: normalized.html,
               outline: normalized.outline,
               wordCount: normalized.wordCount,
               backendDocId: result.docId ?? undefined,
@@ -520,6 +683,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       content: "",
       createdAt: Date.now(),
       status: "streaming",
+      mode: state.settings.mode,
       toolActivity: [],
       notices: [],
     };
@@ -560,13 +724,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           });
         },
         onToolActivity: (toolActivity) => {
-          latestToolActivity = toolActivity;
+          latestToolActivity = hydrateToolActivityTelemetry({
+            settings: state.settings,
+            toolActivity,
+          });
           dispatch({
             type: "updateMessage",
             payload: {
               documentId: messageThreadId,
               messageId: assistantMessage.id,
-              patch: { toolActivity, status: "streaming" },
+              patch: { toolActivity: latestToolActivity, status: "streaming" },
             },
           });
         },
@@ -583,7 +750,20 @@ export function AppProvider({ children }: PropsWithChildren) {
         },
       });
 
-      latestToolActivity = reply.toolActivity;
+      const resolvedUsage = hydrateTurnUsage({
+        settings: state.settings,
+        history: historyWithUserMessage,
+        assistantText: reply.message || accumulated,
+        toolActivity: reply.toolActivity,
+        mode: reply.mode,
+        resultType: reply.resultType,
+        usage: reply.usage,
+      });
+      latestToolActivity = hydrateToolActivityTelemetry({
+        settings: state.settings,
+        toolActivity: reply.toolActivity,
+        usage: resolvedUsage,
+      });
       latestNotices = reply.notices;
 
       if (reply.status === "failed") {
@@ -595,7 +775,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         ...assistantMessage,
         content: assistantContent,
         status: "sent",
-        toolActivity: reply.toolActivity,
+        mode: reply.mode,
+        usage: resolvedUsage,
+        toolActivity: latestToolActivity,
         notices: reply.notices,
       };
 
@@ -607,7 +789,9 @@ export function AppProvider({ children }: PropsWithChildren) {
           patch: {
             content: assistantContent,
             status: "sent",
-            toolActivity: reply.toolActivity,
+            mode: reply.mode,
+            usage: resolvedUsage,
+            toolActivity: latestToolActivity,
             notices: reply.notices,
           },
         },
@@ -725,6 +909,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       content: "",
       createdAt: Date.now(),
       status: "streaming",
+      mode: state.settings.mode,
       toolActivity: [],
       notices: [],
     };
@@ -771,13 +956,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           });
         },
         onToolActivity: (toolActivity) => {
-          latestToolActivity = toolActivity;
+          latestToolActivity = hydrateToolActivityTelemetry({
+            settings: state.settings,
+            toolActivity,
+          });
           dispatch({
             type: "updateMessage",
             payload: {
               documentId: messageThreadId,
               messageId: assistantMessage.id,
-              patch: { toolActivity, status: "streaming" },
+              patch: { toolActivity: latestToolActivity, status: "streaming" },
             },
           });
         },
@@ -794,7 +982,20 @@ export function AppProvider({ children }: PropsWithChildren) {
         },
       });
 
-      latestToolActivity = reply.toolActivity;
+      const resolvedUsage = hydrateTurnUsage({
+        settings: state.settings,
+        history: historyUpToUser,
+        assistantText: reply.message || accumulated,
+        toolActivity: reply.toolActivity,
+        mode: reply.mode,
+        resultType: reply.resultType,
+        usage: reply.usage,
+      });
+      latestToolActivity = hydrateToolActivityTelemetry({
+        settings: state.settings,
+        toolActivity: reply.toolActivity,
+        usage: resolvedUsage,
+      });
       latestNotices = reply.notices;
 
       if (reply.status === "failed") {
@@ -806,7 +1007,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         ...assistantMessage,
         content: assistantContent,
         status: "sent",
-        toolActivity: reply.toolActivity,
+        mode: reply.mode,
+        usage: resolvedUsage,
+        toolActivity: latestToolActivity,
         notices: reply.notices,
       };
 
@@ -818,7 +1021,9 @@ export function AppProvider({ children }: PropsWithChildren) {
           patch: {
             content: assistantContent,
             status: "sent",
-            toolActivity: reply.toolActivity,
+            mode: reply.mode,
+            usage: resolvedUsage,
+            toolActivity: latestToolActivity,
             notices: reply.notices,
           },
         },
@@ -912,7 +1117,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       });
 
       if (!payload.html) {
-        throw new Error("The backend did not return a refreshed HTML projection after apply.");
+        throw new Error("The backend did not return refreshed document HTML after apply.");
       }
 
       dispatch({
@@ -920,13 +1125,14 @@ export function AppProvider({ children }: PropsWithChildren) {
         payload: {
           documentId: selectedDocument.id,
           html: payload.html,
+          sourceHtml: payload.sourceHtml ?? payload.html ?? null,
           session: payload.session,
           revisions: payload.revisions,
           clearReview: true,
           revisionStatus: payload.result?.status ?? "APPLIED",
         },
       });
-      dispatch({ type: "setBanner", payload: "Revision applied to the canonical document." });
+      dispatch({ type: "setBanner", payload: "Revision applied to the fidelity-backed document." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to apply revision: ${getErrorMessage(error)}` });
     }
@@ -944,16 +1150,33 @@ export function AppProvider({ children }: PropsWithChildren) {
         revisionId: selectedDocument.pendingRevisionId,
       });
 
-      dispatch({
-        type: "setDocumentSession",
-        payload: {
-          documentId: selectedDocument.id,
-          session: payload.session,
-          revisions: payload.revisions,
-          clearReview: true,
-          revisionStatus: payload.result?.status ?? "REJECTED",
-        },
-      });
+      const refreshedHtml = payload.html ?? payload.sourceHtml ?? undefined;
+
+      if (refreshedHtml) {
+        dispatch({
+          type: "setDocumentProjection",
+          payload: {
+            documentId: selectedDocument.id,
+            html: refreshedHtml,
+            sourceHtml: payload.sourceHtml ?? payload.html ?? null,
+            session: payload.session,
+            revisions: payload.revisions,
+            clearReview: true,
+            revisionStatus: payload.result?.status ?? "REJECTED",
+          },
+        });
+      } else {
+        dispatch({
+          type: "setDocumentSession",
+          payload: {
+            documentId: selectedDocument.id,
+            session: payload.session,
+            revisions: payload.revisions,
+            clearReview: true,
+            revisionStatus: payload.result?.status ?? "REJECTED",
+          },
+        });
+      }
       dispatch({ type: "setBanner", payload: "Revision rejected." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to reject revision: ${getErrorMessage(error)}` });
@@ -972,22 +1195,25 @@ export function AppProvider({ children }: PropsWithChildren) {
         revisionId: selectedDocument.currentRevisionId,
       });
 
-      if (!payload.html) {
-        throw new Error("The backend did not return a refreshed HTML projection after rollback.");
+      const refreshedHtml = payload.html ?? payload.sourceHtml ?? undefined;
+
+      if (!refreshedHtml) {
+        throw new Error("The backend did not return refreshed document HTML after rollback.");
       }
 
       dispatch({
         type: "setDocumentProjection",
         payload: {
           documentId: selectedDocument.id,
-          html: payload.html,
+          html: refreshedHtml,
+          sourceHtml: payload.sourceHtml ?? payload.html ?? null,
           session: payload.session,
           revisions: payload.revisions,
           clearReview: true,
           revisionStatus: payload.result?.status ?? "REJECTED",
         },
       });
-      dispatch({ type: "setBanner", payload: "Rolled back to the previous canonical revision." });
+      dispatch({ type: "setBanner", payload: "Rolled back to the previous fidelity-preserving revision." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to roll back revision: ${getErrorMessage(error)}` });
     }
@@ -1001,7 +1227,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (selectedDocument.documentSessionId) {
       dispatch({
         type: "setBanner",
-        payload: "Session-backed documents are read-only projections. Use the assistant to stage canonical revisions instead of editing the HTML directly.",
+        payload: "Session-backed DOCX surfaces are read-only fidelity views. Use the assistant to stage structured revisions instead of editing the HTML directly.",
       });
       return;
     }

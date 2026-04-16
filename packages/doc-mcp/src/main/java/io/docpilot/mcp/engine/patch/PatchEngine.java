@@ -129,20 +129,22 @@ public class PatchEngine {
                                  String revisionId,
                                  String author) {
         switch (op.getOp()) {
-            case REPLACE_TEXT_RANGE -> replaceTextRange(op, target, revisionId, author);
-            case INSERT_TEXT_AT     -> insertTextAt(op, target, revisionId, author);
-            case DELETE_TEXT_RANGE  -> deleteTextRange(op, target, revisionId, author);
+            case REPLACE_TEXT_RANGE -> replaceTextRange(op, target, index, revisionId, author);
+            case INSERT_TEXT_AT     -> insertTextAt(op, target, index, revisionId, author);
+            case DELETE_TEXT_RANGE  -> deleteTextRange(op, target, index, revisionId, author);
             case APPLY_STYLE        -> applyStyle(op, target, revisionId, author);
             case APPLY_INLINE_FORMAT-> applyInlineFormat(op, target, revisionId, author);
             case SET_HEADING_LEVEL  -> setHeadingLevel(op, target, revisionId, author);
             case DELETE_BLOCK       -> deleteBlock(op, target, session, revisionId);
             case CREATE_BLOCK       -> createBlock(op, target, session, index, revisionId, author);
+            case CLONE_BLOCK        -> cloneBlock(op, target, session, index, revisionId, author);
             case MOVE_BLOCK         -> moveBlock(op, target, session, index, revisionId, author);
-            case UPDATE_CELL_CONTENT-> replaceTextRange(op, target, revisionId, author); // reuses text replace
+            case UPDATE_CELL_CONTENT-> replaceTextRange(op, target, index, revisionId, author); // reuses text replace
             case INSERT_ROW         -> insertTableRow(op, target, session, revisionId, author);
             case DELETE_ROW         -> deleteTableRow(op, target, session, revisionId);
             case CHANGE_LIST_TYPE   -> changeListType(op, target, revisionId, author);
             case CHANGE_LIST_LEVEL  -> changeListLevel(op, target, revisionId, author);
+            case NORMALIZE_TEXT_RUNS-> normalizeTextRuns(target, revisionId, author);
             default -> log.warn("Unhandled operation type: {}", op.getOp());
         }
     }
@@ -180,44 +182,45 @@ public class PatchEngine {
     //  Concrete operation implementations
     // -----------------------------------------------------------------------
 
-    private void replaceTextRange(PatchOperation op, DocumentComponent c, String revisionId, String author) {
+    private void replaceTextRange(PatchOperation op,
+                                  DocumentComponent c,
+                                  Map<String, DocumentComponent> index,
+                                  String revisionId,
+                                  String author) {
         PatchTarget t   = op.getTarget();
         String newText  = extractTextValue(op.getValue());
         String current  = currentText(c);
         if (current == null) current = "";
 
-        String result;
-        if (t.getStart() != null && t.getEnd() != null) {
-            int start = Math.max(0, t.getStart());
-            int end   = Math.min(current.length(), t.getEnd());
-            result = current.substring(0, start) + newText + current.substring(end);
-        } else {
-            result = newText;
-        }
-        c.setContentProps(withUpdatedText(c.getContentProps(), result));
-        stampRevision(c, revisionId, author);
+        int start = t.getStart() != null ? Math.max(0, Math.min(t.getStart(), current.length())) : 0;
+        int end = t.getEnd() != null ? Math.max(start, Math.min(t.getEnd(), current.length())) : current.length();
+        mutateText(c, index, start, end, newText, revisionId, author);
     }
 
-    private void insertTextAt(PatchOperation op, DocumentComponent c, String revisionId, String author) {
+    private void insertTextAt(PatchOperation op,
+                              DocumentComponent c,
+                              Map<String, DocumentComponent> index,
+                              String revisionId,
+                              String author) {
         PatchTarget t  = op.getTarget();
         String insert  = extractTextValue(op.getValue());
         String current = currentText(c);
         if (current == null) current = "";
-        int pos = t.getStart() != null ? Math.min(t.getStart(), current.length()) : current.length();
-        String result = current.substring(0, pos) + insert + current.substring(pos);
-        c.setContentProps(withUpdatedText(c.getContentProps(), result));
-        stampRevision(c, revisionId, author);
+        int pos = t.getStart() != null ? Math.min(Math.max(t.getStart(), 0), current.length()) : current.length();
+        mutateText(c, index, pos, pos, insert, revisionId, author);
     }
 
-    private void deleteTextRange(PatchOperation op, DocumentComponent c, String revisionId, String author) {
+    private void deleteTextRange(PatchOperation op,
+                                 DocumentComponent c,
+                                 Map<String, DocumentComponent> index,
+                                 String revisionId,
+                                 String author) {
         PatchTarget t  = op.getTarget();
         String current = currentText(c);
         if (current == null) return;
         int start = t.getStart() != null ? Math.max(0, t.getStart()) : 0;
         int end   = t.getEnd()   != null ? Math.min(current.length(), t.getEnd()) : current.length();
-        String result = current.substring(0, start) + current.substring(end);
-        c.setContentProps(withUpdatedText(c.getContentProps(), result));
-        stampRevision(c, revisionId, author);
+        mutateText(c, index, start, Math.max(start, end), "", revisionId, author);
     }
 
     private void applyStyle(PatchOperation op, DocumentComponent c, String revisionId, String author) {
@@ -294,11 +297,11 @@ public class PatchEngine {
                 parent.setChildren(new ArrayList<>());
             }
 
-            DocumentComponent newBlock = buildBlockFromValue(op.getValue(), parent.getId());
             String parentPath = parent.getAnchor() != null ? parent.getAnchor().getLogicalPath() : "document";
-            String styleId = newBlock.getStyleRef() != null ? newBlock.getStyleRef().getStyleId() : null;
+            DocumentComponent newBlock = buildBlockFromValue(op.getValue(), parent.getId(), afterTarget, parentPath, revisionId, author);
             String logicalPath = parentPath + "/" + newBlock.getType().name().toLowerCase() + "[" + (parent.getChildren().size() + 1) + "]";
             if (newBlock.getAnchor() == null) {
+                String styleId = newBlock.getStyleRef() != null ? newBlock.getStyleRef().getStyleId() : null;
                 newBlock.setAnchor(anchorService.generate(newBlock.getType(), logicalPath, currentText(newBlock), styleId, parentPath));
             }
             stampRevisionTree(newBlock, revisionId, author);
@@ -316,6 +319,42 @@ public class PatchEngine {
         } catch (Exception e) {
             log.error("CREATE_BLOCK failed: {}", e.getMessage(), e);
         }
+    }
+
+    private void cloneBlock(PatchOperation op,
+                             DocumentComponent target,
+                             DocumentSession session,
+                             Map<String, DocumentComponent> index,
+                             String revisionId,
+                             String author) {
+        if (target.getParentId() == null) {
+            return;
+        }
+
+        DocumentComponent parent = index.get(target.getParentId());
+        if (parent == null) {
+            return;
+        }
+        if (parent.getChildren() == null) {
+            parent.setChildren(new ArrayList<>());
+        }
+
+        int targetIndex = -1;
+        for (int i = 0; i < parent.getChildren().size(); i++) {
+            if (parent.getChildren().get(i).getId().equals(target.getId())) {
+                targetIndex = i;
+                break;
+            }
+        }
+        if (targetIndex < 0) {
+            return;
+        }
+
+        String parentPath = parent.getAnchor() != null ? parent.getAnchor().getLogicalPath() : "document";
+        String logicalPath = parentPath + "/" + target.getType().name().toLowerCase(Locale.ROOT) + "[" + (targetIndex + 2) + "]";
+        DocumentComponent cloned = cloneComponentTree(target, parent.getId(), parentPath, logicalPath, revisionId, author);
+        parent.getChildren().add(targetIndex + 1, cloned);
+        stampRevision(parent, revisionId, author);
     }
 
     private void moveBlock(PatchOperation op,
@@ -384,39 +423,12 @@ public class PatchEngine {
         int colCount = row != null && row.getChildren() != null
             ? row.getChildren().size()
             : (!table.getChildren().isEmpty() ? table.getChildren().get(0).getChildren().size() : 1);
-        DocumentComponent newRow = DocumentComponent.builder()
-            .id(UUID.randomUUID().toString())
-            .type(ComponentType.TABLE_ROW)
-            .parentId(table.getId())
-            .children(new ArrayList<>())
-            .build();
         String tablePath = table.getAnchor() != null ? table.getAnchor().getLogicalPath() : "table";
         String rowPath = tablePath + "/row[" + (rowInsertIndex + 1) + "]";
-        newRow.setAnchor(anchorService.generate(ComponentType.TABLE_ROW, rowPath, "", null, tablePath));
         String tableFingerprint = table.getAnchor() != null ? table.getAnchor().getStructuralFingerprint() : table.getId();
-        for (int i = 0; i < colCount; i++) {
-            String cellPath = rowPath + "/cell[" + (i + 1) + "]";
-            Anchor cellAnchor = anchorService.generateCellAnchor(
-                cellPath,
-                "",
-                null,
-                rowPath,
-                table.getId(),
-                newRow.getId(),
-                rowInsertIndex,
-                i,
-                tableFingerprint
-            );
-            DocumentComponent cell = DocumentComponent.builder()
-                .id(cellAnchor.getStableId())
-                .type(ComponentType.TABLE_CELL)
-                .parentId(newRow.getId())
-                .anchor(cellAnchor)
-                .contentProps(ContentProps.builder().text("").build())
-                .children(new ArrayList<>())
-                .build();
-            newRow.getChildren().add(cell);
-        }
+        DocumentComponent newRow = row != null
+            ? cloneTableRow(row, table.getId(), table.getId(), rowInsertIndex, rowPath, tablePath, tableFingerprint, revisionId, author)
+            : buildBlankTableRow(table.getId(), rowInsertIndex, colCount, tablePath, rowPath, tableFingerprint, revisionId, author);
         stampRevisionTree(newRow, revisionId, author);
 
         List<DocumentComponent> rows = table.getChildren();
@@ -466,6 +478,13 @@ public class PatchEngine {
                                                       Map<String, DocumentComponent> index) {
         if (target == null) {
             return Optional.empty();
+        }
+
+        if (target.getRunId() != null) {
+            DocumentComponent run = index.get(target.getRunId());
+            if (run != null) {
+                return Optional.of(run);
+            }
         }
 
         if (target.getRowId() != null
@@ -523,6 +542,15 @@ public class PatchEngine {
     }
 
     private String currentText(DocumentComponent c) {
+        if (hasTextRunChildren(c)) {
+            StringBuilder text = new StringBuilder();
+            for (DocumentComponent child : textRunChildren(c)) {
+                if (child.getContentProps() != null && child.getContentProps().getText() != null) {
+                    text.append(child.getContentProps().getText());
+                }
+            }
+            return text.toString();
+        }
         return c.getContentProps() != null ? c.getContentProps().getText() : null;
     }
 
@@ -604,7 +632,12 @@ public class PatchEngine {
         return null;
     }
 
-    private DocumentComponent buildBlockFromValue(JsonNode value, String parentId) {
+    private DocumentComponent buildBlockFromValue(JsonNode value,
+                                                 String parentId,
+                                                 DocumentComponent afterTarget,
+                                                 String parentPath,
+                                                 String revisionId,
+                                                 String author) {
         if (value.has("contentProps") || value.has("anchor") || value.has("styleRef")) {
             try {
                 DocumentComponent component = objectMapper.treeToValue(value, DocumentComponent.class);
@@ -621,8 +654,29 @@ public class PatchEngine {
             }
         }
 
+        String requestedText = extractTextValue(value);
+        if (afterTarget != null) {
+            String logicalPath = parentPath + "/" + afterTarget.getType().name().toLowerCase(Locale.ROOT) + "[clone]";
+            DocumentComponent cloned = cloneComponentTree(afterTarget, parentId, parentPath, logicalPath, revisionId, author);
+            if (value.hasNonNull("type")) {
+                cloned.setType(componentTypeFrom(extractStringValue(value, "type")));
+            }
+            if (value.hasNonNull("styleId") || value.hasNonNull("style_id") || value.hasNonNull("styleName") || value.hasNonNull("style_name")) {
+                cloned.setStyleRef(StyleRef.builder()
+                    .styleId(extractStringValue(value, "styleId", "style_id"))
+                    .styleName(extractStringValue(value, "styleName", "style_name"))
+                    .build());
+            }
+            if (value.hasNonNull("headingLevel") || value.hasNonNull("heading_level") || value.hasNonNull("level")) {
+                Integer headingLevel = extractIntegerValue(value, "headingLevel", "heading_level", "level");
+                LayoutProps layout = cloned.getLayoutProps() != null ? cloned.getLayoutProps() : LayoutProps.builder().build();
+                cloned.setLayoutProps(layout.toBuilder().headingLevel(headingLevel).build());
+            }
+            overwriteText(cloned, requestedText, revisionId, author);
+            return cloned;
+        }
+
         ComponentType type = componentTypeFrom(extractStringValue(value, "type"));
-        String text = extractTextValue(value);
         String styleId = extractStringValue(value, "styleId", "style_id");
         String styleName = extractStringValue(value, "styleName", "style_name");
 
@@ -648,7 +702,7 @@ public class PatchEngine {
                 ? StyleRef.builder().styleId(styleId).styleName(styleName).build()
                 : null)
             .layoutProps(layout.build())
-            .contentProps(ContentProps.builder().text(text).build())
+            .contentProps(ContentProps.builder().text(requestedText).build())
             .children(new ArrayList<>())
             .build();
     }
@@ -693,6 +747,317 @@ public class PatchEngine {
                 stampRevisionTree(child, revisionId, author);
             }
         }
+    }
+
+    private void mutateText(DocumentComponent component,
+                            Map<String, DocumentComponent> index,
+                            int start,
+                            int end,
+                            String replacement,
+                            String revisionId,
+                            String author) {
+        String current = currentText(component);
+        if (current == null) {
+            current = "";
+        }
+        int boundedStart = Math.max(0, Math.min(start, current.length()));
+        int boundedEnd = Math.max(boundedStart, Math.min(end, current.length()));
+
+        if (component.getType() == ComponentType.TEXT_RUN) {
+            String updated = current.substring(0, boundedStart) + replacement + current.substring(boundedEnd);
+            component.setContentProps(withUpdatedText(component.getContentProps(), updated));
+            stampRevision(component, revisionId, author);
+            syncParentText(component, index, revisionId, author);
+            return;
+        }
+
+        if (hasTextRunChildren(component)) {
+            rewriteTextRuns(component, boundedStart, boundedEnd, replacement, revisionId, author);
+            syncBlockTextFromRuns(component);
+            stampRevision(component, revisionId, author);
+            return;
+        }
+
+        String updated = current.substring(0, boundedStart) + replacement + current.substring(boundedEnd);
+        component.setContentProps(withUpdatedText(component.getContentProps(), updated));
+        stampRevision(component, revisionId, author);
+    }
+
+    private void overwriteText(DocumentComponent component, String text, String revisionId, String author) {
+        String nextText = text != null ? text : "";
+        if (hasTextRunChildren(component)) {
+            List<DocumentComponent> rebuiltRuns = new ArrayList<>();
+            DocumentComponent template = textRunChildren(component).isEmpty() ? null : textRunChildren(component).get(0);
+            if (template != null) {
+                rebuiltRuns.add(cloneRunSegment(template, nextText, component.getId()));
+            } else {
+                rebuiltRuns.add(buildTextRun(nextText, component.getId(), component.getAnchor() != null ? component.getAnchor().getLogicalPath() : "block"));
+            }
+            reanchorRunChildren(component, rebuiltRuns);
+        }
+        component.setContentProps(withUpdatedText(component.getContentProps(), nextText));
+        stampRevision(component, revisionId, author);
+    }
+
+    private void normalizeTextRuns(DocumentComponent component, String revisionId, String author) {
+        if (!hasTextRunChildren(component)) {
+            return;
+        }
+        overwriteText(component, currentText(component), revisionId, author);
+    }
+
+    private void rewriteTextRuns(DocumentComponent component,
+                                 int start,
+                                 int end,
+                                 String replacement,
+                                 String revisionId,
+                                 String author) {
+        List<DocumentComponent> runs = textRunChildren(component);
+        if (runs.isEmpty()) {
+            component.setContentProps(withUpdatedText(component.getContentProps(), replacement));
+            return;
+        }
+
+        List<DocumentComponent> rebuiltRuns = new ArrayList<>();
+        boolean replacementInserted = replacement == null || replacement.isEmpty();
+        DocumentComponent insertionTemplate = runs.get(0);
+        int cursor = 0;
+
+        for (DocumentComponent run : runs) {
+            String text = run.getContentProps() != null && run.getContentProps().getText() != null
+                ? run.getContentProps().getText()
+                : "";
+            int runStart = cursor;
+            int runEnd = cursor + text.length();
+            cursor = runEnd;
+
+            if (end <= runStart || start >= runEnd) {
+                rebuiltRuns.add(cloneRunSegment(run, text, component.getId()));
+                continue;
+            }
+
+            insertionTemplate = run;
+            int localStart = Math.max(0, start - runStart);
+            int localEnd = Math.min(text.length(), end - runStart);
+            String prefix = text.substring(0, localStart);
+            String suffix = text.substring(Math.max(localEnd, localStart));
+
+            if (!prefix.isEmpty()) {
+                rebuiltRuns.add(cloneRunSegment(run, prefix, component.getId()));
+            }
+
+            if (!replacementInserted && replacement != null && !replacement.isEmpty()) {
+                rebuiltRuns.add(cloneRunSegment(insertionTemplate, replacement, component.getId()));
+                replacementInserted = true;
+            }
+
+            if (!suffix.isEmpty()) {
+                rebuiltRuns.add(cloneRunSegment(run, suffix, component.getId()));
+            }
+        }
+
+        if (!replacementInserted && replacement != null && !replacement.isEmpty()) {
+            rebuiltRuns.add(cloneRunSegment(insertionTemplate, replacement, component.getId()));
+        }
+        if (rebuiltRuns.isEmpty()) {
+            rebuiltRuns.add(cloneRunSegment(insertionTemplate, "", component.getId()));
+        }
+
+        reanchorRunChildren(component, rebuiltRuns);
+        for (DocumentComponent run : component.getChildren()) {
+            stampRevision(run, revisionId, author);
+        }
+    }
+
+    private void syncParentText(DocumentComponent child,
+                                Map<String, DocumentComponent> index,
+                                String revisionId,
+                                String author) {
+        if (child.getParentId() == null) {
+            return;
+        }
+        DocumentComponent parent = index.get(child.getParentId());
+        if (parent == null || !hasTextRunChildren(parent)) {
+            return;
+        }
+        syncBlockTextFromRuns(parent);
+        stampRevision(parent, revisionId, author);
+    }
+
+    private void syncBlockTextFromRuns(DocumentComponent component) {
+        component.setContentProps(withUpdatedText(component.getContentProps(), currentText(component)));
+    }
+
+    private boolean hasTextRunChildren(DocumentComponent component) {
+        return component.getChildren() != null && component.getChildren().stream().anyMatch(child -> child.getType() == ComponentType.TEXT_RUN);
+    }
+
+    private List<DocumentComponent> textRunChildren(DocumentComponent component) {
+        if (component.getChildren() == null) {
+            return List.of();
+        }
+        return component.getChildren().stream()
+            .filter(child -> child.getType() == ComponentType.TEXT_RUN)
+            .toList();
+    }
+
+    private DocumentComponent cloneRunSegment(DocumentComponent template, String text, String parentId) {
+        return DocumentComponent.builder()
+            .id(UUID.randomUUID().toString())
+            .type(ComponentType.TEXT_RUN)
+            .parentId(parentId)
+            .styleRef(template.getStyleRef())
+            .layoutProps(template.getLayoutProps())
+            .contentProps(withUpdatedText(template.getContentProps(), text))
+            .children(new ArrayList<>())
+            .build();
+    }
+
+    private DocumentComponent buildTextRun(String text, String parentId, String parentPath) {
+        return DocumentComponent.builder()
+            .id(UUID.randomUUID().toString())
+            .type(ComponentType.TEXT_RUN)
+            .parentId(parentId)
+            .contentProps(ContentProps.builder().text(text).build())
+            .anchor(anchorService.generate(ComponentType.TEXT_RUN, parentPath + "/text_run[1]", text, null, parentPath))
+            .children(new ArrayList<>())
+            .build();
+    }
+
+    private void reanchorRunChildren(DocumentComponent parent, List<DocumentComponent> runs) {
+        String parentPath = parent.getAnchor() != null ? parent.getAnchor().getLogicalPath() : "block";
+        List<DocumentComponent> reanchored = new ArrayList<>();
+        int index = 0;
+        for (DocumentComponent run : runs) {
+            index += 1;
+            String text = run.getContentProps() != null && run.getContentProps().getText() != null ? run.getContentProps().getText() : "";
+            run.setId(UUID.randomUUID().toString());
+            run.setParentId(parent.getId());
+            run.setAnchor(anchorService.generate(ComponentType.TEXT_RUN, parentPath + "/text_run[" + index + "]", text, null, parentPath));
+            reanchored.add(run);
+        }
+        parent.setChildren(reanchored);
+    }
+
+    private DocumentComponent cloneComponentTree(DocumentComponent source,
+                                                String parentId,
+                                                String parentPath,
+                                                String logicalPath,
+                                                String revisionId,
+                                                String author) {
+        String styleId = source.getStyleRef() != null ? source.getStyleRef().getStyleId() : null;
+        DocumentComponent cloned = DocumentComponent.builder()
+            .id(UUID.randomUUID().toString())
+            .type(source.getType())
+            .parentId(parentId)
+            .styleRef(source.getStyleRef())
+            .layoutProps(source.getLayoutProps())
+            .contentProps(source.getContentProps())
+            .anchor(anchorService.generate(source.getType(), logicalPath, currentText(source), styleId, parentPath))
+            .children(new ArrayList<>())
+            .build();
+
+        Map<String, Integer> childCounters = new HashMap<>();
+        if (source.getChildren() != null) {
+            for (DocumentComponent child : source.getChildren()) {
+                String typeKey = child.getType() != null ? child.getType().name().toLowerCase(Locale.ROOT) : "component";
+                int childIndex = childCounters.merge(typeKey, 1, Integer::sum);
+                String childPath = logicalPath + "/" + typeKey + "[" + childIndex + "]";
+                cloned.getChildren().add(cloneComponentTree(child, cloned.getId(), logicalPath, childPath, revisionId, author));
+            }
+        }
+        stampRevision(cloned, revisionId, author);
+        return cloned;
+    }
+
+    private DocumentComponent cloneTableRow(DocumentComponent row,
+                                           String tableId,
+                                           String parentId,
+                                           int rowIndex,
+                                           String rowPath,
+                                           String tablePath,
+                                           String tableFingerprint,
+                                           String revisionId,
+                                           String author) {
+        DocumentComponent clonedRow = DocumentComponent.builder()
+            .id(UUID.randomUUID().toString())
+            .type(ComponentType.TABLE_ROW)
+            .parentId(parentId)
+            .styleRef(row.getStyleRef())
+            .layoutProps(row.getLayoutProps())
+            .contentProps(row.getContentProps())
+            .anchor(anchorService.generate(ComponentType.TABLE_ROW, rowPath, "", null, tablePath))
+            .children(new ArrayList<>())
+            .build();
+
+        int colIndex = 0;
+        if (row.getChildren() != null) {
+            for (DocumentComponent sourceCell : row.getChildren()) {
+                String cellPath = rowPath + "/cell[" + (colIndex + 1) + "]";
+                Anchor cellAnchor = anchorService.generateCellAnchor(
+                    cellPath,
+                    "",
+                    sourceCell.getStyleRef() != null ? sourceCell.getStyleRef().getStyleId() : null,
+                    rowPath,
+                    tableId,
+                    clonedRow.getId(),
+                    rowIndex,
+                    colIndex,
+                    tableFingerprint
+                );
+                DocumentComponent clonedCell = cloneComponentTree(sourceCell, clonedRow.getId(), rowPath, cellPath, revisionId, author);
+                clonedCell.setId(cellAnchor.getStableId());
+                clonedCell.setAnchor(cellAnchor);
+                clonedCell.setParentId(clonedRow.getId());
+                overwriteText(clonedCell, "", revisionId, author);
+                clonedRow.getChildren().add(clonedCell);
+                colIndex += 1;
+            }
+        }
+        return clonedRow;
+    }
+
+    private DocumentComponent buildBlankTableRow(String tableId,
+                                                 int rowIndex,
+                                                 int colCount,
+                                                 String tablePath,
+                                                 String rowPath,
+                                                 String tableFingerprint,
+                                                 String revisionId,
+                                                 String author) {
+        DocumentComponent newRow = DocumentComponent.builder()
+            .id(UUID.randomUUID().toString())
+            .type(ComponentType.TABLE_ROW)
+            .parentId(tableId)
+            .anchor(anchorService.generate(ComponentType.TABLE_ROW, rowPath, "", null, tablePath))
+            .children(new ArrayList<>())
+            .build();
+
+        for (int i = 0; i < colCount; i++) {
+            String cellPath = rowPath + "/cell[" + (i + 1) + "]";
+            Anchor cellAnchor = anchorService.generateCellAnchor(
+                cellPath,
+                "",
+                null,
+                rowPath,
+                tableId,
+                newRow.getId(),
+                rowIndex,
+                i,
+                tableFingerprint
+            );
+            DocumentComponent cell = DocumentComponent.builder()
+                .id(cellAnchor.getStableId())
+                .type(ComponentType.TABLE_CELL)
+                .parentId(newRow.getId())
+                .anchor(cellAnchor)
+                .contentProps(ContentProps.builder().text("").build())
+                .children(new ArrayList<>())
+                .build();
+            newRow.getChildren().add(cell);
+        }
+        stampRevisionTree(newRow, revisionId, author);
+        return newRow;
     }
 
     private String estimateScope(int opCount, int blockCount) {

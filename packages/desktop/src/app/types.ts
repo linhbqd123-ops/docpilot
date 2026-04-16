@@ -1,6 +1,7 @@
 import type { ThemeMode } from "@/app/themes";
 
 export type SidebarView = "library" | "outline" | "review" | "connect" | "settings";
+export type ChatMode = "ask" | "agent";
 
 export type DocumentKind = "html" | "markdown" | "text" | "docx" | "pdf" | "unknown";
 
@@ -55,6 +56,27 @@ export interface AgentNotice {
   items?: string[];
 }
 
+export interface TurnUsageRequest {
+  requestIndex: number;
+  phase?: string | null;
+  provider?: string;
+  providerDisplayName?: string;
+  model?: string | null;
+  inputChars: number;
+  outputChars: number;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+}
+
+export interface TurnUsage {
+  requestCount: number;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+  requests: TurnUsageRequest[];
+}
+
 export interface ToolActivity {
   event: string;
   tool?: string;
@@ -94,6 +116,7 @@ export interface DocumentRecord {
   size: number;
   status: DocumentStatus;
   html: string;
+  sourceHtml?: string | null;
   outline: OutlineItem[];
   wordCount: number;
   createdAt: number;
@@ -117,6 +140,8 @@ export interface ChatMessage {
   content: string;
   createdAt: number;
   status?: "streaming" | "sent" | "error";
+  mode?: ChatMode;
+  usage?: TurnUsage;
   toolActivity?: ToolActivity[];
   notices?: AgentNotice[];
 }
@@ -140,7 +165,7 @@ export interface AppSettings {
   streaming: boolean;
   connectOnStartup: boolean;
   /** Chat mode: 'agent' uses document-aware agent flows; 'ask' uses a simple Q&A mode. */
-  mode: "agent" | "ask";
+  mode: ChatMode;
   theme: ThemeMode;
 }
 
@@ -171,13 +196,14 @@ export interface AppState extends PersistedState {
 export interface AgentTurnResponse {
   chatId?: string;
   message: string;
-  mode: "ask" | "agent";
+  mode: ChatMode;
   intent?: string | null;
   resultType: "answer" | "clarify" | "revision_staged";
   documentSessionId?: string | null;
   baseRevisionId?: string | null;
   revisionId?: string | null;
   status: string;
+  usage?: TurnUsage;
   proposal?: RevisionProposal | null;
   review?: RevisionReview | null;
   toolActivity: ToolActivity[];
@@ -197,6 +223,7 @@ export interface ImportedDocumentPayload {
 export interface SessionRefreshPayload {
   documentSessionId: string;
   html?: string;
+  sourceHtml?: string | null;
   session: SessionSummary;
   revisions: SessionRevisionSummary[];
   result?: {

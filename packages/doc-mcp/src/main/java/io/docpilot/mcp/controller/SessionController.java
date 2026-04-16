@@ -1,5 +1,8 @@
 package io.docpilot.mcp.controller;
 
+import io.docpilot.mcp.converter.AnalysisHtmlConverter;
+import io.docpilot.mcp.converter.DocxToHtmlConverter;
+import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
 import io.docpilot.mcp.engine.importer.DocxImportService;
 import io.docpilot.mcp.engine.projection.HtmlProjectionService;
 import io.docpilot.mcp.exception.NotFoundException;
@@ -15,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.Map;
 import java.util.UUID;
@@ -34,6 +38,9 @@ import java.util.UUID;
 public class SessionController {
 
     private final DocxImportService importService;
+    private final DocxToHtmlConverter docxToHtmlConverter;
+    private final AnalysisHtmlConverter analysisHtmlConverter;
+    private final FidelityHtmlService fidelityHtmlService;
     private final HtmlProjectionService htmlProjectionService;
     private final DocumentSessionStore sessionStore;
     private final RevisionStore revisionStore;
@@ -54,13 +61,22 @@ public class SessionController {
         String sessionId = UUID.randomUUID().toString();
         String docId     = UUID.randomUUID().toString();
 
-        try (InputStream in = file.getInputStream()) {
+        byte[] docxBytes = file.getBytes();
+        String sourceHtml;
+        try (InputStream htmlIn = new ByteArrayInputStream(docxBytes)) {
+            sourceHtml = docxToHtmlConverter.convert(htmlIn, docId, originalName).html();
+        }
+        try (InputStream in = new ByteArrayInputStream(docxBytes)) {
             DocumentSession session = importService.importDocx(in, sessionId, docId, originalName);
+            String preparedSourceHtml = fidelityHtmlService.annotateForSession(sourceHtml, session);
+            String analysisHtml = analysisHtmlConverter.convert(preparedSourceHtml);
             semanticSearchService.reindexSession(session);
             sessionStore.save(session);
             revisionStore.saveInitialSnapshot(sessionId, session.getRoot());
-            // Save raw DOCX bytes for rollback support
-            sessionStore.saveDocxSnapshot(sessionId, file.getBytes());
+            sessionStore.saveDocxSnapshot(sessionId, docxBytes);
+            sessionStore.saveTextAsset(sessionId, FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME, preparedSourceHtml);
+            sessionStore.saveTextAsset(sessionId, FidelityHtmlService.ORIGINAL_SOURCE_ASSET_NAME, preparedSourceHtml);
+            sessionStore.saveTextAsset(sessionId, FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME, analysisHtml);
             log.info("Imported DOCX: filename={} sessionId={} wordCount={}", originalName, sessionId, session.getWordCount());
 
             return ResponseEntity.ok(Map.of(
@@ -71,7 +87,9 @@ public class SessionController {
                 "paragraph_count", session.getParagraphCount(),
                 "table_count", session.getTableCount(),
                 "image_count", session.getImageCount(),
-                "section_count", session.getSectionCount()
+                "section_count", session.getSectionCount(),
+                "source_html", preparedSourceHtml,
+                "analysis_html", analysisHtml
             ));
         }
     }
@@ -114,6 +132,24 @@ public class SessionController {
         DocumentSession s = sessionStore.find(id)
             .orElseThrow(() -> new NotFoundException("Session not found: " + id));
         String html = fragment ? htmlProjectionService.projectFragment(s) : htmlProjectionService.project(s);
+        return ResponseEntity.ok(html);
+    }
+
+    @GetMapping(value = "/{id}/source/html", produces = MediaType.TEXT_HTML_VALUE)
+    public ResponseEntity<String> getSourceHtml(@PathVariable String id) {
+        sessionStore.find(id)
+            .orElseThrow(() -> new NotFoundException("Session not found: " + id));
+        String html = sessionStore.findTextAsset(id, FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+            .orElseThrow(() -> new NotFoundException("Source HTML not found for session: " + id));
+        return ResponseEntity.ok(html);
+    }
+
+    @GetMapping(value = "/{id}/analysis/html", produces = MediaType.TEXT_HTML_VALUE)
+    public ResponseEntity<String> getAnalysisHtml(@PathVariable String id) {
+        sessionStore.find(id)
+            .orElseThrow(() -> new NotFoundException("Session not found: " + id));
+        String html = sessionStore.findTextAsset(id, FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME)
+            .orElseThrow(() -> new NotFoundException("Analysis HTML not found for session: " + id));
         return ResponseEntity.ok(html);
     }
 

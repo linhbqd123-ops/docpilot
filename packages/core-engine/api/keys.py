@@ -26,6 +26,7 @@ KNOWN_PROVIDERS = [
     "azure",
     "openrouter",
     "together",
+    "nvidia",
     "zai",
     "ollama",
     "custom",
@@ -102,6 +103,8 @@ def _get_env_var_name(provider: str, var_type: str = "key") -> str:
             return "OPENROUTER_API_KEY"
         elif provider == "together":
             return "TOGETHER_API_KEY"
+        elif provider == "nvidia":
+            return "NVIDIA_API_KEY"
         elif provider == "zai":
             return "ZAI_API_KEY"
         elif provider == "custom":
@@ -120,6 +123,8 @@ def _get_env_var_name(provider: str, var_type: str = "key") -> str:
             return "OPENROUTER_BASE_URL"
         elif provider == "together":
             return "TOGETHER_BASE_URL"
+        elif provider == "nvidia":
+            return "NVIDIA_BASE_URL"
         elif provider == "zai":
             return "ZAI_BASE_URL"
         elif provider == "anthropic":
@@ -183,6 +188,7 @@ def _get_settings_attr_name(provider: str, var_type: str) -> Optional[str]:
             "azure": "azure_openai_api_key",
             "openrouter": "openrouter_api_key",
             "together": "together_api_key",
+            "nvidia": "nvidia_api_key",
             "zai": "zai_api_key",
             "custom": "custom_api_key",
         }.get(provider)
@@ -195,6 +201,7 @@ def _get_settings_attr_name(provider: str, var_type: str) -> Optional[str]:
             "azure": "azure_openai_endpoint",
             "openrouter": "openrouter_base_url",
             "together": "together_base_url",
+            "nvidia": "nvidia_base_url",
             "zai": "zai_base_url",
             "ollama": "ollama_base_url",
             "custom": "custom_base_url",

@@ -140,15 +140,12 @@ export default function Dropdown({
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "field-shell flex w-full items-center justify-between gap-3 pr-3",
+          "field-shell flex w-full items-center justify-between gap-1 pr-3",
           buttonClassName,
         )}
       >
         <div className="min-w-0 text-left">
           <div className="truncate font-medium text-docpilot-textStrong">{selected?.label ?? placeholder}</div>
-          {selected?.description ? (
-            <div className="text-[11px] text-docpilot-muted">{selected.description}</div>
-          ) : null}
         </div>
         <ChevronDown size={16} className="text-docpilot-muted" />
       </button>

@@ -1,6 +1,9 @@
 package io.docpilot.mcp.engine.revision;
 
+import io.docpilot.mcp.converter.AnalysisHtmlConverter;
+import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
 import io.docpilot.mcp.engine.patch.PatchEngine;
+import io.docpilot.mcp.exception.ConflictException;
 import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.patch.Patch;
 import io.docpilot.mcp.model.patch.PatchValidation;
@@ -14,6 +17,7 @@ import io.docpilot.mcp.store.RevisionStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.*;
@@ -33,12 +37,15 @@ import java.util.*;
 @Service
 @RequiredArgsConstructor
 @Slf4j
+@Transactional
 public class RevisionService {
 
     private final PatchEngine patchEngine;
     private final RevisionStore revisionStore;
     private final DocumentSessionStore sessionStore;
     private final SemanticSearchService semanticSearchService;
+    private final FidelityHtmlService fidelityHtmlService;
+    private final AnalysisHtmlConverter analysisHtmlConverter;
 
     // -----------------------------------------------------------------------
     //  Stage (create PENDING revision)
@@ -66,8 +73,8 @@ public class RevisionService {
             .scope(validation.getScope())
             .build();
 
-        revisionStore.saveRevision(revision);
         revisionStore.savePatch(patch.getPatchId(), patch);
+        revisionStore.saveRevision(revision);
         log.info("Staged revision {} for session {} (status={})", revisionId, session.getSessionId(), revision.getStatus());
         return revision;
     }
@@ -95,7 +102,7 @@ public class RevisionService {
             return revision;
         }
         if (revision.getStatus() == RevisionStatus.REJECTED) {
-            throw new IllegalStateException("Cannot apply a REJECTED revision: " + revisionId);
+            throw new ConflictException("This revision has already been rejected and cannot be applied.");
         }
 
         Patch patch = revisionStore.findPatch(revision.getPatchId())
@@ -132,8 +139,14 @@ public class RevisionService {
             log.info("Revision {} rebased onto {} (no overlap)", revisionId, currentRev);
         }
 
+        String sourceHtml = sessionStore.findTextAsset(session.getSessionId(), FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+            .orElseThrow(() -> new IllegalStateException(
+                "Current fidelity source HTML is missing for session " + session.getSessionId() + "."
+            ));
+
         // ── Apply ─────────────────────────────────────────────────────────
         patchEngine.apply(patch, session, revisionId, revision.getAuthor());
+        syncFidelityHtmlAfterApply(session, patch, revisionId, sourceHtml);
         revisionStore.saveSnapshot(session.getSessionId(), revisionId, session.getRoot());
         sessionStore.save(session);
         semanticSearchService.reindexSession(session);
@@ -174,12 +187,14 @@ public class RevisionService {
             .orElseThrow(() -> new NoSuchElementException("Revision not found: " + revisionId));
 
         if (revision.getStatus() != RevisionStatus.APPLIED) {
-            throw new IllegalStateException("Can only roll back an APPLIED revision");
+            throw new ConflictException("Only an applied revision can be rolled back.");
         }
 
         if (!Objects.equals(session.getCurrentRevisionId(), revisionId)) {
-            throw new IllegalStateException("Can only roll back the current applied revision");
+            throw new ConflictException("Only the current applied revision can be rolled back.");
         }
+
+        String restoredHtml = loadFidelityHtmlSnapshot(session.getSessionId(), revision.getBaseRevisionId());
 
         DocumentComponent restoredRoot = revision.getBaseRevisionId() == null || revision.getBaseRevisionId().isBlank()
             ? revisionStore.findInitialSnapshot(session.getSessionId())
@@ -190,6 +205,7 @@ public class RevisionService {
         session.setRoot(restoredRoot);
         session.setCurrentRevisionId(revision.getBaseRevisionId());
         session.setLastModifiedAt(Instant.now());
+    restoreFidelityHtmlSnapshot(session, restoredHtml);
         sessionStore.save(session);
         semanticSearchService.reindexSession(session);
 
@@ -216,5 +232,29 @@ public class RevisionService {
             .author(revision.getAuthor())
             .scope(revision.getScope())
             .build();
+    }
+
+    private void syncFidelityHtmlAfterApply(DocumentSession session, Patch patch, String revisionId, String sourceHtml) {
+        String updatedSourceHtml = fidelityHtmlService.applyPatch(sourceHtml, patch, session);
+        sessionStore.saveTextAsset(session.getSessionId(), FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME, updatedSourceHtml);
+        sessionStore.saveTextAsset(session.getSessionId(), FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME, analysisHtmlConverter.convert(updatedSourceHtml));
+        sessionStore.saveTextAsset(session.getSessionId(), FidelityHtmlService.revisionSourceSnapshotAssetName(revisionId), updatedSourceHtml);
+    }
+
+    private String loadFidelityHtmlSnapshot(String sessionId, String revisionId) {
+        String assetName = revisionId == null || revisionId.isBlank()
+            ? FidelityHtmlService.ORIGINAL_SOURCE_ASSET_NAME
+            : FidelityHtmlService.revisionSourceSnapshotAssetName(revisionId);
+
+        return sessionStore.findTextAsset(sessionId, assetName)
+            .orElseThrow(() -> new IllegalStateException(
+                "Fidelity source snapshot '" + assetName + "' is missing for session " + sessionId + "."
+            ));
+    }
+
+    private void restoreFidelityHtmlSnapshot(DocumentSession session, String restoredHtml) {
+        String aligned = fidelityHtmlService.annotateForSession(restoredHtml, session);
+        sessionStore.saveTextAsset(session.getSessionId(), FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME, aligned);
+        sessionStore.saveTextAsset(session.getSessionId(), FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME, analysisHtmlConverter.convert(aligned));
     }
 }

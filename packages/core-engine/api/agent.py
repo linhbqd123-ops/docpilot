@@ -6,8 +6,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.turn_orchestrator import stream_turn
+from debug_logging import get_trace_id, log_core_event
 from providers import ProviderName, get_provider
-from services.doc_mcp_client import DocMcpClient, DocMcpResponseError, DocMcpUnavailableError
+from services.doc_mcp_client import DocMcpClient, MappedDocMcpError, map_doc_mcp_error
 
 router = APIRouter()
 
@@ -84,13 +85,16 @@ def _resolve_provider(name: ProviderName, model_override: str | None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _mapped_doc_mcp_error(exc: Exception) -> MappedDocMcpError:
+    return map_doc_mcp_error(
+        exc,
+        internal_message="The assistant could not complete the document request right now. Please try again.",
+    )
+
+
 def _map_doc_mcp_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, DocMcpUnavailableError):
-        return HTTPException(status_code=503, detail=str(exc))
-    if isinstance(exc, DocMcpResponseError):
-        status_code = exc.status_code if exc.status_code in {400, 404, 409} else 502
-        return HTTPException(status_code=status_code, detail=str(exc))
-    return HTTPException(status_code=500, detail=f"Agent turn failed: {exc}")
+    mapped = _mapped_doc_mcp_error(exc)
+    return HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
 def _doc_mcp_client() -> DocMcpClient:
@@ -98,6 +102,20 @@ def _doc_mcp_client() -> DocMcpClient:
 
 
 async def _run_turn(request: AgentTurnRequest):
+    log_core_event(
+        "agent.api.request",
+        traceId=get_trace_id() or None,
+        provider=request.provider,
+        model=request.model,
+        chatId=request.chat_id,
+        documentSessionId=request.document_session_id,
+        mode=request.mode,
+        baseRevisionId=request.base_revision_id,
+        prompt=request.prompt,
+        selection=request.selection.model_dump(by_alias=True) if request.selection else None,
+        workspaceContext=request.workspace_context.model_dump(by_alias=True) if request.workspace_context else None,
+        history=[message.model_dump() for message in request.history],
+    )
     provider = _resolve_provider(request.provider, request.model)
     history = [message.model_dump() for message in request.history]
     selection = request.selection.to_payload() if request.selection else None
@@ -126,16 +144,61 @@ async def _session_payload(session_id: str) -> dict[str, Any]:
     }
 
 
+async def _session_render_payload(session_id: str) -> dict[str, Any]:
+    client = _doc_mcp_client()
+    source_html = await client.get_source_html(session_id)
+    return {
+        "documentSessionId": session_id,
+        "html": source_html,
+        "sourceHtml": source_html,
+    }
+
+
 @router.post("/agent/turn/stream")
 async def agent_turn_stream(request: AgentTurnRequest):
     async def event_generator():
+        log_core_event(
+            "agent.api.stream.open",
+            traceId=get_trace_id() or None,
+            chatId=request.chat_id,
+            documentSessionId=request.document_session_id,
+        )
         try:
             async for event_type, data in _run_turn(request):
+                if event_type != "assistant_delta":
+                    log_core_event(
+                        "agent.api.stream.event",
+                        traceId=get_trace_id() or None,
+                        eventType=event_type,
+                        payload=data,
+                    )
                 yield _sse(event_type, data)
         except Exception as exc:  # noqa: BLE001
-            mapped = _map_doc_mcp_error(exc)
-            yield _sse("notice", {"message": mapped.detail, "statusCode": mapped.status_code})
-            yield _sse("done", {"status": "failed", "message": "", "documentSessionId": request.document_session_id})
+            mapped = _mapped_doc_mcp_error(exc)
+            log_core_event(
+                "agent.api.stream.error",
+                traceId=get_trace_id() or None,
+                statusCode=mapped.status_code,
+                detail=mapped.message,
+                internalDetail=str(exc),
+            )
+            notice_payload: dict[str, Any] = {
+                "message": mapped.message,
+                "statusCode": mapped.status_code,
+            }
+            if mapped.code:
+                notice_payload["code"] = mapped.code
+            if mapped.items:
+                notice_payload["items"] = list(mapped.items)
+            yield _sse("notice", notice_payload)
+            yield _sse(
+                "done",
+                {
+                    "status": "failed",
+                    "message": mapped.message,
+                    "documentSessionId": request.document_session_id,
+                },
+            )
 
     return StreamingResponse(
         event_generator(),
@@ -181,6 +244,11 @@ async def agent_turn(request: AgentTurnRequest):
     payload["toolActivity"] = tool_activity
     if notices:
         payload["notices"] = notices
+    log_core_event(
+        "agent.api.response",
+        traceId=get_trace_id() or None,
+        payload=payload,
+    )
     return payload
 
 
@@ -194,10 +262,12 @@ async def get_agent_session(session_id: str):
 
 @router.get("/agent/sessions/{session_id}/projection")
 async def get_agent_session_projection(session_id: str, fragment: bool = True):
-    client = _doc_mcp_client()
     try:
-        html = await client.get_html_projection(session_id, fragment=fragment)
-        return {"documentSessionId": session_id, "html": html}
+        if fragment:
+            return await _session_render_payload(session_id)
+        client = _doc_mcp_client()
+        html = await client.get_source_html(session_id)
+        return {"documentSessionId": session_id, "html": html, "sourceHtml": html}
     except Exception as exc:  # noqa: BLE001
         raise _map_doc_mcp_error(exc) from exc
 
@@ -237,12 +307,10 @@ async def apply_agent_revision(revision_id: str):
             raise HTTPException(status_code=500, detail="Revision does not include a session id.")
         result = await client.apply_revision(revision_id)
         session_payload = await _session_payload(session_id)
-        projection = await client.get_html_projection(session_id, fragment=True)
         return {
             "result": result,
-            "documentSessionId": session_id,
-            "html": projection,
             **session_payload,
+            **(await _session_render_payload(session_id)),
         }
     except HTTPException:
         raise
@@ -260,6 +328,7 @@ async def reject_agent_revision(revision_id: str):
         payload = {"result": result}
         if session_id:
             payload.update(await _session_payload(session_id))
+            payload.update(await _session_render_payload(session_id))
         return payload
     except Exception as exc:  # noqa: BLE001
         raise _map_doc_mcp_error(exc) from exc
@@ -275,12 +344,10 @@ async def rollback_agent_revision(revision_id: str):
             raise HTTPException(status_code=500, detail="Revision does not include a session id.")
         result = await client.rollback_revision(revision_id)
         session_payload = await _session_payload(session_id)
-        projection = await client.get_html_projection(session_id, fragment=True)
         return {
             "result": result,
-            "documentSessionId": session_id,
-            "html": projection,
             **session_payload,
+            **(await _session_render_payload(session_id)),
         }
     except HTTPException:
         raise

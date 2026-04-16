@@ -6,7 +6,9 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from services.sqlite_utils import initialize_sqlite, sqlite_connection
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +141,7 @@ class SQLiteDocumentStore:
 
     def _initialize(self) -> None:
         with self._lock:
-            self.database_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as connection:
+            def initialize_schema(connection: sqlite3.Connection) -> None:
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS documents (
@@ -169,14 +170,10 @@ class SQLiteDocumentStore:
                     """
                 )
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+            initialize_sqlite(self.database_path, initialize_schema)
+
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        return sqlite_connection(self.database_path)
 
     def _deserialize_document(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -234,6 +231,7 @@ class SQLiteDocumentStore:
             "size": _as_int(raw_document.get("size"), 0),
             "status": _as_str(raw_document.get("status"), "ready"),
             "html": _as_str(raw_document.get("html"), ""),
+            "sourceHtml": _as_str(raw_document.get("sourceHtml"), "") or None,
             "outline": outline,
             "wordCount": _as_int(raw_document.get("wordCount"), 0),
             "createdAt": created_at,

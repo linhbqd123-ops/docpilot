@@ -9,6 +9,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -109,6 +110,19 @@ public class DocumentSessionStore {
      * Saves a raw DOCX byte snapshot alongside the session for rollback support.
      */
     public void saveDocxSnapshot(String sessionId, byte[] docxBytes) {
+        saveBinaryAsset(sessionId, "original.docx", docxBytes);
+    }
+
+    public void saveTextAsset(String sessionId, String assetName, String text) {
+        saveBinaryAsset(sessionId, assetName, text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    public Optional<String> findTextAsset(String sessionId, String assetName) {
+        return findBinaryAsset(sessionId, assetName)
+            .map(bytes -> new String(bytes, StandardCharsets.UTF_8));
+    }
+
+    private void saveBinaryAsset(String sessionId, String assetName, byte[] payload) {
         jdbcTemplate.update(
             """
             INSERT INTO session_binary_assets (session_id, asset_name, payload, updated_at)
@@ -118,18 +132,22 @@ public class DocumentSessionStore {
                 updated_at = excluded.updated_at
             """,
             sessionId,
-            "original.docx",
-            docxBytes,
+            assetName,
+            payload,
             java.time.Instant.now().toString()
         );
     }
 
     public Optional<byte[]> findDocxSnapshot(String sessionId) {
+        return findBinaryAsset(sessionId, "original.docx");
+    }
+
+    private Optional<byte[]> findBinaryAsset(String sessionId, String assetName) {
         return jdbcTemplate.query(
             "SELECT payload FROM session_binary_assets WHERE session_id = ? AND asset_name = ?",
             rs -> rs.next() ? Optional.ofNullable(rs.getBytes("payload")) : Optional.<byte[]>empty(),
             sessionId,
-            "original.docx"
+            assetName
         );
     }
 

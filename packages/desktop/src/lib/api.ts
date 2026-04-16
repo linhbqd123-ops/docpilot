@@ -3,6 +3,7 @@ import type {
   AgentTurnResponse,
   AppSettings,
   Chat,
+  ChatMode,
   ChatMessage,
   DocumentRecord,
   ImportedDocumentPayload,
@@ -14,6 +15,8 @@ import type {
   SessionRevisionSummary,
   SessionSummary,
   ToolActivity,
+  TurnUsage,
+  TurnUsageRequest,
 } from "@/app/types";
 import { createTraceId, logFrontendDebug } from "@/lib/debug";
 
@@ -62,6 +65,10 @@ function asNumber(value: unknown, fallback = 0) {
 
 function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function asChatMode(value: unknown): ChatMode | undefined {
+  return value === "ask" || value === "agent" ? value : undefined;
 }
 
 function parseDocumentKind(value: unknown): DocumentRecord["kind"] {
@@ -229,6 +236,58 @@ function parseChatStatus(value: unknown): ChatMessage["status"] {
   }
 }
 
+function parseTurnUsageRequest(value: unknown): TurnUsageRequest | null {
+  const record = asRecord(value);
+  const requestIndex = asNumber(record.requestIndex ?? record.request_index, 0);
+
+  if (requestIndex <= 0) {
+    return null;
+  }
+
+  return {
+    requestIndex,
+    phase: asNonEmptyString(record.phase) ?? null,
+    provider: asNonEmptyString(record.provider),
+    providerDisplayName: asNonEmptyString(record.providerDisplayName ?? record.provider_display_name),
+    model: asNonEmptyString(record.model) ?? null,
+    inputChars: asNumber(record.inputChars ?? record.input_chars, 0),
+    outputChars: asNumber(record.outputChars ?? record.output_chars, 0),
+    estimatedInputTokens: asNumber(record.estimatedInputTokens ?? record.estimated_input_tokens, 0),
+    estimatedOutputTokens: asNumber(record.estimatedOutputTokens ?? record.estimated_output_tokens, 0),
+    estimatedTotalTokens: asNumber(record.estimatedTotalTokens ?? record.estimated_total_tokens, 0),
+  };
+}
+
+function parseTurnUsage(value: unknown): TurnUsage | undefined {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return undefined;
+  }
+
+  const requests = Array.isArray(record.requests)
+    ? record.requests
+      .map(parseTurnUsageRequest)
+      .filter((request): request is TurnUsageRequest => request !== null)
+    : [];
+
+  const requestCount = asNumber(record.requestCount ?? record.request_count, requests.length);
+  const estimatedInputTokens = asNumber(record.estimatedInputTokens ?? record.estimated_input_tokens, 0);
+  const estimatedOutputTokens = asNumber(record.estimatedOutputTokens ?? record.estimated_output_tokens, 0);
+  const estimatedTotalTokens = asNumber(record.estimatedTotalTokens ?? record.estimated_total_tokens, 0);
+
+  if (requestCount <= 0 && estimatedTotalTokens <= 0 && requests.length === 0) {
+    return undefined;
+  }
+
+  return {
+    requestCount,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedTotalTokens,
+    requests,
+  };
+}
+
 function parseChatMessage(value: unknown): ChatMessage | null {
   const record = asRecord(value);
   const id = asNonEmptyString(record.id);
@@ -243,6 +302,8 @@ function parseChatMessage(value: unknown): ChatMessage | null {
     content: asNonEmptyString(record.content) ?? "",
     createdAt: asNumber(record.createdAt ?? record.created_at, Date.now()),
     status: parseChatStatus(record.status),
+    mode: asChatMode(record.mode),
+    usage: parseTurnUsage(record.usage),
     toolActivity: Array.isArray(record.toolActivity ?? record.tool_activity)
       ? ((record.toolActivity ?? record.tool_activity) as unknown[])
         .map(parseToolActivity)
@@ -321,7 +382,7 @@ function parseAgentTurnResponse(value: unknown): AgentTurnResponse {
   return {
     chatId: asNonEmptyString(record.chatId ?? record.chat_id),
     message: asNonEmptyString(record.message) ?? "",
-    mode: record.mode === "ask" ? "ask" : "agent",
+    mode: asChatMode(record.mode) ?? "agent",
     intent: asNonEmptyString(record.intent) ?? null,
     resultType:
       record.resultType === "revision_staged" || record.result_type === "revision_staged"
@@ -337,6 +398,7 @@ function parseAgentTurnResponse(value: unknown): AgentTurnResponse {
       review?.revisionId ??
       null,
     status: asNonEmptyString(record.status) ?? "completed",
+    usage: parseTurnUsage(record.usage),
     proposal,
     review,
     toolActivity,
@@ -352,11 +414,13 @@ function parseSessionRefreshPayload(value: unknown): SessionRefreshPayload {
       .map(parseSessionRevisionSummary)
       .filter((revision): revision is SessionRevisionSummary => revision !== null)
     : [];
+  const sourceHtml = asNonEmptyString(record.sourceHtml ?? record.source_html) ?? null;
 
   return {
     documentSessionId:
       asNonEmptyString(record.documentSessionId ?? record.document_session_id) ?? session.sessionId,
-    html: asNonEmptyString(record.html),
+    html: asNonEmptyString(record.html) ?? sourceHtml ?? undefined,
+    sourceHtml,
     session,
     revisions,
     result: parseMutationResult(record.result),
@@ -402,6 +466,7 @@ function parseDocumentRecord(value: unknown): DocumentRecord | null {
     size: asNumber(record.size, 0),
     status: parseDocumentStatus(record.status),
     html: asNonEmptyString(record.html) ?? "",
+    sourceHtml: asNonEmptyString(record.sourceHtml ?? record.source_html) ?? null,
     outline,
     wordCount: asNumber(record.wordCount ?? record.word_count, 0),
     createdAt: asNumber(record.createdAt ?? record.created_at, Date.now()),
@@ -425,6 +490,58 @@ function tryParseJson(payload: string) {
   } catch {
     return payload;
   }
+}
+
+function extractErrorMessage(payload: unknown): string | undefined {
+  if (typeof payload === "string") {
+    return payload.trim() || undefined;
+  }
+
+  const record = asRecord(payload);
+  const detail = asNonEmptyString(record.detail);
+  if (detail) {
+    return detail;
+  }
+
+  const error = asNonEmptyString(record.error);
+  if (error) {
+    return error;
+  }
+
+  const message = asNonEmptyString(record.message);
+  if (message) {
+    return message;
+  }
+
+  if (Array.isArray(record.notices)) {
+    const noticeText = record.notices
+      .map((notice) => {
+        const noticeRecord = asRecord(notice);
+        const parts = [
+          asNonEmptyString(noticeRecord.message),
+          ...asStringArray(noticeRecord.items),
+        ].filter(Boolean);
+        return parts.join(" ").trim();
+      })
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+
+    if (noticeText) {
+      return noticeText;
+    }
+  }
+
+  return undefined;
+}
+
+function extractErrorMessageFromBody(bodyText: string, fallbackMessage: string) {
+  const trimmed = bodyText.trim();
+  if (!trimmed) {
+    return fallbackMessage;
+  }
+
+  return extractErrorMessage(tryParseJson(trimmed)) ?? trimmed;
 }
 
 interface AgentTurnStreamCallbacks {
@@ -563,7 +680,7 @@ async function readAgentEventStream(
 async function readJsonResponse<T>(response: Response, fallbackMessage: string, transform: (payload: unknown) => T) {
   if (!response.ok) {
     const bodyText = await response.text();
-    throw new ApiError(bodyText || fallbackMessage, response.status);
+    throw new ApiError(extractErrorMessageFromBody(bodyText, fallbackMessage), response.status);
   }
 
   return transform(await response.json());
@@ -628,7 +745,7 @@ export async function sendAgentTurnToBackend(args: {
     model: settings.modelOverride.trim() || undefined,
     chatId,
     documentSessionId,
-    mode: (settings as unknown as { mode?: string }).mode || "agent",
+    mode: settings.mode,
     baseRevisionId: currentRevisionId ?? undefined,
     prompt,
     workspaceContext: {
@@ -742,7 +859,7 @@ export async function exportDocumentToDocx(args: {
 
   if (!response.ok) {
     const bodyText = await response.text();
-    throw new ApiError(bodyText || "Export failed.", response.status);
+    throw new ApiError(extractErrorMessageFromBody(bodyText, "Export failed."), response.status);
   }
 
   return response.blob();
@@ -843,7 +960,7 @@ export class HTTPClient {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new ApiError(error || "Request failed", response.status);
+      throw new ApiError(extractErrorMessageFromBody(error, "Request failed"), response.status);
     }
 
     const data = (await response.json()) as T;
@@ -859,7 +976,7 @@ export class HTTPClient {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new ApiError(error || "Request failed", response.status);
+      throw new ApiError(extractErrorMessageFromBody(error, "Request failed"), response.status);
     }
 
     const data = (await response.json()) as T;
@@ -874,7 +991,7 @@ export class HTTPClient {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new ApiError(error || "Request failed", response.status);
+      throw new ApiError(extractErrorMessageFromBody(error, "Request failed"), response.status);
     }
 
     const data = (await response.json()) as T;

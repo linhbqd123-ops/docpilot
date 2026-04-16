@@ -2,6 +2,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from api import chats as chats_api
 from api import documents as documents_api
@@ -32,6 +33,7 @@ def test_document_crud_persists_across_store_reloads(tmp_path: Path) -> None:
         "size": 2048,
         "status": "ready",
         "html": "<p>Initial content</p>",
+        "sourceHtml": "<article><p>Initial DOCX content</p></article>",
         "outline": [{"id": "intro", "title": "Intro", "level": 1}],
         "wordCount": 2,
         "createdAt": 1710000000000,
@@ -54,6 +56,7 @@ def test_document_crud_persists_across_store_reloads(tmp_path: Path) -> None:
         created_document = create_response.json()["document"]
         assert created_document["id"] == "doc-stable-1"
         assert created_document["documentSessionId"] == "session-1"
+        assert created_document["sourceHtml"] == "<article><p>Initial DOCX content</p></article>"
 
         fetch_response = client.get("/api/documents/doc-stable-1")
         assert fetch_response.status_code == 200
@@ -74,6 +77,7 @@ def test_document_crud_persists_across_store_reloads(tmp_path: Path) -> None:
                 **create_payload,
                 "name": "Product brief v2.docx",
                 "html": "<p>Updated content</p>",
+                "sourceHtml": "<article><p>Initial DOCX content</p></article>",
                 "updatedAt": 1710000010000,
                 "pendingRevisionId": "rev-2",
                 "revisionStatus": "PENDING",
@@ -97,6 +101,7 @@ def test_document_crud_persists_across_store_reloads(tmp_path: Path) -> None:
         assert updated_document["name"] == "Product brief v2.docx"
         assert updated_document["pendingRevisionId"] == "rev-2"
         assert updated_document["reviewPayload"]["revisionId"] == "rev-2"
+        assert updated_document["sourceHtml"] == "<article><p>Initial DOCX content</p></article>"
 
 
 def test_deleting_document_also_cleans_up_linked_chats(tmp_path: Path) -> None:
@@ -115,6 +120,7 @@ def test_deleting_document_also_cleans_up_linked_chats(tmp_path: Path) -> None:
                 "size": 128,
                 "status": "ready",
                 "html": "<p>Proposal</p>",
+                "sourceHtml": None,
                 "outline": [],
                 "wordCount": 1,
                 "createdAt": 1711000000000,
@@ -149,3 +155,96 @@ def test_deleting_document_also_cleans_up_linked_chats(tmp_path: Path) -> None:
         chats_response = client.get("/api/chats")
         assert chats_response.status_code == 200
         assert chats_response.json()["chats"] == []
+
+
+class ImportDocMcpClient:
+    def __init__(self, *, session_payload: dict, source_html: str | None = None) -> None:
+        self.session_payload = session_payload
+        self.source_html = source_html
+        self.import_calls: list[tuple[str, str]] = []
+        self.source_calls: list[str] = []
+
+    async def import_docx_session(self, filename: str, content: bytes, content_type: str) -> dict:
+        self.import_calls.append((filename, content_type))
+        return self.session_payload
+
+    async def get_source_html(self, session_id: str) -> str:
+        self.source_calls.append(session_id)
+        if self.source_html is None:
+            raise AssertionError("Unexpected get_source_html call")
+        return self.source_html
+
+
+def test_docx_import_prefers_source_html_from_session_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_store = SQLiteDocumentStore(tmp_path / "docpilot.db")
+    chat_store = SQLiteChatStore(tmp_path / "docpilot.db")
+    fake_client = ImportDocMcpClient(
+        session_payload={
+            "doc_id": "doc-123",
+            "session_id": "session-123",
+            "source_html": "<article><h1>CV Source</h1><p>Styled source HTML</p></article>",
+        }
+    )
+
+    monkeypatch.setattr(documents_api, "_doc_mcp_client", lambda: fake_client)
+
+    with TestClient(build_document_app(document_store, chat_store)) as client:
+        response = client.post(
+            "/api/documents/import",
+            files={
+                "file": (
+                    "cv.docx",
+                    b"fake-docx-content",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["docId"] == "doc-123"
+    assert payload["documentSessionId"] == "session-123"
+    assert payload["html"] == "<article><h1>CV Source</h1><p>Styled source HTML</p></article>"
+    assert fake_client.import_calls == [
+        ("cv.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    ]
+    assert fake_client.source_calls == []
+
+
+def test_docx_import_falls_back_to_source_html_endpoint_when_missing_from_session_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document_store = SQLiteDocumentStore(tmp_path / "docpilot.db")
+    chat_store = SQLiteChatStore(tmp_path / "docpilot.db")
+    fake_client = ImportDocMcpClient(
+        session_payload={
+            "doc_id": "doc-456",
+            "session_id": "session-456",
+        },
+        source_html="<article><p>Fallback source snapshot</p></article>",
+    )
+
+    monkeypatch.setattr(documents_api, "_doc_mcp_client", lambda: fake_client)
+
+    with TestClient(build_document_app(document_store, chat_store)) as client:
+        response = client.post(
+            "/api/documents/import",
+            files={
+                "file": (
+                    "cv.docx",
+                    b"fake-docx-content",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["docId"] == "doc-456"
+    assert payload["documentSessionId"] == "session-456"
+    assert payload["html"] == "<article><p>Fallback source snapshot</p></article>"
+    assert fake_client.source_calls == ["session-456"]

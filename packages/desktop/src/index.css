@@ -177,11 +177,11 @@
   }
 
   .action-button {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-border bg-docpilot-panelAlt px-3 py-2 text-sm font-medium text-docpilot-text transition hover:border-docpilot-accent/40 hover:bg-docpilot-hover disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-border bg-docpilot-panelAlt px-3 py-2 text-sm font-medium text-docpilot-text transition-all duration-150 hover:-translate-y-px hover:border-docpilot-accent/40 hover:bg-docpilot-hover active:translate-y-0 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .action-button-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-accent bg-docpilot-accent px-3 py-2 text-sm font-semibold text-docpilot-accentContrast transition hover:border-docpilot-accentHover hover:bg-docpilot-accentHover disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-docpilot-accent bg-docpilot-accent px-3 py-2 text-sm font-semibold text-docpilot-accentContrast transition-all duration-150 hover:-translate-y-px hover:border-docpilot-accentHover hover:bg-docpilot-accentHover active:translate-y-0 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   .badge {

@@ -1,6 +1,9 @@
 package io.docpilot.mcp.engine.revision;
 
+import io.docpilot.mcp.converter.AnalysisHtmlConverter;
+import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
 import io.docpilot.mcp.engine.patch.PatchEngine;
+import io.docpilot.mcp.exception.ConflictException;
 import io.docpilot.mcp.model.document.ComponentType;
 import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.patch.Patch;
@@ -39,7 +42,7 @@ class RevisionServiceTest {
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
         InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
         RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
-        RevisionService revisionService = new RevisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
 
         DocumentComponent originalRoot = component("root-original");
         DocumentSession session = session("session-1", "rev-base", originalRoot);
@@ -48,6 +51,7 @@ class RevisionServiceTest {
 
         revisionStore.revisions.put("rev-apply", revision);
         revisionStore.patches.put("patch-1", patch);
+        seedCurrentSourceHtml(sessionStore, "session-1", "<article><p data-doc-node-id=\"block-1\">Original</p></article>");
 
         Revision applied = revisionService.apply("rev-apply", session);
 
@@ -71,6 +75,17 @@ class RevisionServiceTest {
         assertEquals(1, sessionStore.savedSessions.size());
         assertSame(session, sessionStore.savedSessions.get(0));
         assertEquals(List.of("session-1"), semanticSearchService.reindexedSessionIds);
+        assertTrue(
+            sessionStore.findTextAsset("session-1", FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+                .orElseThrow()
+                .contains("Original")
+        );
+        assertTrue(sessionStore.findTextAsset("session-1", FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME).isPresent());
+        assertTrue(
+            sessionStore.findTextAsset("session-1", FidelityHtmlService.revisionSourceSnapshotAssetName("rev-apply"))
+                .orElseThrow()
+                .contains("Original")
+        );
 
         Revision savedRevision = revisionStore.savedRevisions.get(revisionStore.savedRevisions.size() - 1);
         assertEquals(RevisionStatus.APPLIED, savedRevision.getStatus());
@@ -84,7 +99,7 @@ class RevisionServiceTest {
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
         InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
         RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
-        RevisionService revisionService = new RevisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
 
         DocumentSession session = session("session-1", "rev-manual", component("root-current"));
         Revision revision = revision("rev-pending", "session-1", "rev-base", "patch-1", RevisionStatus.PENDING);
@@ -112,7 +127,7 @@ class RevisionServiceTest {
         RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
         InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
-        RevisionService revisionService = new RevisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
 
         Revision revision = revision("rev-reject", "session-1", "rev-base", "patch-1", RevisionStatus.PENDING);
         revisionStore.revisions.put("rev-reject", revision);
@@ -132,7 +147,7 @@ class RevisionServiceTest {
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
         InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
         RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
-        RevisionService revisionService = new RevisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
 
         DocumentComponent currentRoot = component("root-current");
         DocumentComponent restoredRoot = component("root-restored");
@@ -141,6 +156,7 @@ class RevisionServiceTest {
 
         revisionStore.revisions.put("rev-apply", revision);
         revisionStore.snapshots.put("session-1::rev-base", restoredRoot);
+        seedRevisionSourceSnapshot(sessionStore, "session-1", "rev-base", "<article><p>Restored version</p></article>");
 
         Revision rolledBack = revisionService.rollback("rev-apply", session);
 
@@ -152,6 +168,68 @@ class RevisionServiceTest {
         assertEquals(List.of("session-1"), semanticSearchService.reindexedSessionIds);
         assertEquals(1, revisionStore.savedRevisions.size());
         assertEquals(RevisionStatus.REJECTED, revisionStore.savedRevisions.get(0).getStatus());
+        assertTrue(
+            sessionStore.findTextAsset("session-1", FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+                .orElseThrow()
+                .contains("Restored version")
+        );
+    }
+
+    @Test
+    void applyFailsBeforeMutatingSessionWhenCurrentFidelityHtmlIsMissing() {
+        DocumentComponent originalRoot = component("root-original");
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("root-applied"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+
+        DocumentSession session = session("session-1", "rev-base", originalRoot);
+        Revision revision = revision("rev-apply", "session-1", "rev-base", "patch-1", RevisionStatus.PENDING);
+        Patch patch = patch("patch-1", "session-1", "rev-base", List.of("block-1"));
+
+        revisionStore.revisions.put("rev-apply", revision);
+        revisionStore.patches.put("patch-1", patch);
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> revisionService.apply("rev-apply", session)
+        );
+
+        assertEquals("Current fidelity source HTML is missing for session session-1.", error.getMessage());
+        assertFalse(patchEngine.applyCalled);
+        assertSame(originalRoot, session.getRoot());
+        assertEquals("rev-base", session.getCurrentRevisionId());
+        assertTrue(sessionStore.savedSessions.isEmpty());
+        assertTrue(semanticSearchService.reindexedSessionIds.isEmpty());
+    }
+
+    @Test
+    void rollbackFailsBeforeMutatingSessionWhenFidelitySnapshotIsMissing() {
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+
+        DocumentComponent currentRoot = component("root-current");
+        DocumentComponent restoredRoot = component("root-restored");
+        DocumentSession session = session("session-1", "rev-apply", currentRoot);
+        Revision revision = revision("rev-apply", "session-1", "rev-base", "patch-1", RevisionStatus.APPLIED);
+
+        revisionStore.revisions.put("rev-apply", revision);
+        revisionStore.snapshots.put("session-1::rev-base", restoredRoot);
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> revisionService.rollback("rev-apply", session)
+        );
+
+        assertEquals("Fidelity source snapshot 'source.snapshot.rev-base.html' is missing for session session-1.", error.getMessage());
+        assertSame(currentRoot, session.getRoot());
+        assertEquals("rev-apply", session.getCurrentRevisionId());
+        assertTrue(sessionStore.savedSessions.isEmpty());
+        assertTrue(semanticSearchService.reindexedSessionIds.isEmpty());
     }
 
     @Test
@@ -159,19 +237,35 @@ class RevisionServiceTest {
         RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
         InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
-        RevisionService revisionService = new RevisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
 
         DocumentSession session = session("session-1", "rev-other", component("root-current"));
         Revision revision = revision("rev-apply", "session-1", "rev-base", "patch-1", RevisionStatus.APPLIED);
         revisionStore.revisions.put("rev-apply", revision);
 
-        IllegalStateException error = assertThrows(
-            IllegalStateException.class,
+        ConflictException error = assertThrows(
+            ConflictException.class,
             () -> revisionService.rollback("rev-apply", session)
         );
 
-        assertEquals("Can only roll back the current applied revision", error.getMessage());
+        assertEquals("Only the current applied revision can be rolled back.", error.getMessage());
         assertTrue(sessionStore.savedSessions.isEmpty());
+    }
+
+    private static RevisionService revisionService(
+        PatchEngine patchEngine,
+        InMemoryRevisionStore revisionStore,
+        InMemoryDocumentSessionStore sessionStore,
+        RecordingSemanticSearchService semanticSearchService
+    ) {
+        return new RevisionService(
+            patchEngine,
+            revisionStore,
+            sessionStore,
+            semanticSearchService,
+            new FidelityHtmlService(),
+            new AnalysisHtmlConverter()
+        );
     }
 
     private static Revision revision(
@@ -237,6 +331,14 @@ class RevisionServiceTest {
             .type(ComponentType.DOCUMENT)
             .children(new ArrayList<>())
             .build();
+    }
+
+    private static void seedCurrentSourceHtml(InMemoryDocumentSessionStore sessionStore, String sessionId, String html) {
+        sessionStore.saveTextAsset(sessionId, FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME, html);
+    }
+
+    private static void seedRevisionSourceSnapshot(InMemoryDocumentSessionStore sessionStore, String sessionId, String revisionId, String html) {
+        sessionStore.saveTextAsset(sessionId, FidelityHtmlService.revisionSourceSnapshotAssetName(revisionId), html);
     }
 
     private record SavedSnapshot(String sessionId, String revisionId, DocumentComponent root) {}
@@ -350,6 +452,7 @@ class RevisionServiceTest {
 
     private static final class InMemoryDocumentSessionStore extends DocumentSessionStore {
         private final List<DocumentSession> savedSessions = new ArrayList<>();
+        private final Map<String, String> textAssets = new ConcurrentHashMap<>();
 
         private InMemoryDocumentSessionStore() {
             super(null, null, null);
@@ -358,6 +461,16 @@ class RevisionServiceTest {
         @Override
         public void save(DocumentSession session) {
             savedSessions.add(session);
+        }
+
+        @Override
+        public void saveTextAsset(String sessionId, String assetName, String text) {
+            textAssets.put(sessionId + "::" + assetName, text);
+        }
+
+        @Override
+        public Optional<String> findTextAsset(String sessionId, String assetName) {
+            return Optional.ofNullable(textAssets.get(sessionId + "::" + assetName));
         }
     }
 

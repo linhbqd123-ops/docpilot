@@ -30,6 +30,11 @@ DOCX response:
 }
 ```
 
+Notes:
+
+- For DOCX imports, `html` is now the high-fidelity source HTML snapshot produced during import, not the canonical projection.
+- The canonical projection is still available from `/api/agent/sessions/{id}/projection` for revision-backed refreshes.
+
 PDF response stays HTML-based but is not session-backed.
 
 ### `POST /api/documents/export`
@@ -88,7 +93,27 @@ Response when the turn only answers:
   "documentSessionId": "session_123",
   "baseRevisionId": "rev_123",
   "revisionId": null,
-  "status": "completed"
+  "status": "completed",
+  "usage": {
+    "requestCount": 1,
+    "estimatedInputTokens": 320,
+    "estimatedOutputTokens": 88,
+    "estimatedTotalTokens": 408,
+    "requests": [
+      {
+        "requestIndex": 1,
+        "phase": "compose_answer",
+        "provider": "ollama",
+        "providerDisplayName": "Ollama (local)",
+        "model": "llama3.2",
+        "inputChars": 1240,
+        "outputChars": 350,
+        "estimatedInputTokens": 320,
+        "estimatedOutputTokens": 88,
+        "estimatedTotalTokens": 408
+      }
+    ]
+  }
 }
 ```
 
@@ -105,6 +130,7 @@ Response when agent mode stages a revision:
   "baseRevisionId": "rev_123",
   "revisionId": "rev_456",
   "status": "completed",
+  "usage": { "requestCount": 1, "estimatedTotalTokens": 612, "requests": [ ... ] },
   "proposal": { "revision_id": "rev_456", "status": "PENDING", "validation": { ... } },
   "review": { ... },
   "toolActivity": [ ... ],
@@ -125,7 +151,8 @@ SSE events:
 Notes:
 
 - `tool_started` / `tool_finished` may include regular doc-mcp tool names such as `answer_about_document`, `inspect_document`, `locate_relevant_context`, `propose_document_edit`, plus `llm_inference` phases like `compose_answer` and `plan_revision`.
-- When retrieval does not yield enough snippets for an ask turn, the backend may emit `get_html_projection` activity and use the current projected document text as a fallback context source.
+- `llm_inference` activity now carries `requestIndex`, `provider`, `providerDisplayName`, `model`, and estimated token metadata so the UI can show explicit AI request traces.
+- When retrieval does not yield enough snippets for an ask turn, the backend may emit `get_analysis_html` activity and use compact analysis HTML derived from the imported DOCX as a fallback context source.
 - Frontends should surface tool activity progressively during the stream so users can see inference steps while the answer is being generated.
 
 ## Session and revision APIs

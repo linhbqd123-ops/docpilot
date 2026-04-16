@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.docpilot.mcp.config.AppProperties;
+import io.docpilot.mcp.exception.ConflictException;
+import io.docpilot.mcp.exception.McpToolException;
+import io.docpilot.mcp.exception.NotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
@@ -13,6 +16,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -71,13 +76,31 @@ public class McpController {
         try {
             ObjectNode result = dispatch(method, params);
             return ResponseEntity.ok(successResponse(idNode, result));
+        } catch (McpToolException e) {
+            return ResponseEntity.ok(errorResponse(
+                idNode,
+                e.getRpcCode(),
+                e.getUserMessage(),
+                errorData(e.getErrorCode(), e.getHttpStatus(), e.getUserMessage(), e.getItems(), e.isRetryable())
+            ));
         } catch (MethodNotFoundException e) {
             return ResponseEntity.ok(errorResponse(idNode, METHOD_NOT_FOUND, e.getMessage()));
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.ok(errorResponse(idNode, INVALID_PARAMS, e.getMessage()));
+            return ResponseEntity.ok(errorResponse(
+                idNode,
+                INVALID_PARAMS,
+                e.getMessage(),
+                errorData("invalid_request", 400, e.getMessage(), List.of(), false)
+            ));
         } catch (Exception e) {
             log.error("MCP internal error for method={}", method, e);
-            return ResponseEntity.ok(errorResponse(idNode, INTERNAL_ERROR, "Internal error: " + e.getMessage()));
+            String userMessage = "The document action could not be completed right now. Please try again.";
+            return ResponseEntity.ok(errorResponse(
+                idNode,
+                INTERNAL_ERROR,
+                userMessage,
+                errorData("internal_error", 502, userMessage, List.of(), true)
+            ));
         }
     }
 
@@ -152,10 +175,18 @@ public class McpController {
         try {
             rawResult = tool.handler().handle(arguments);
         } catch (IllegalArgumentException e) {
-            throw e;
+            throw McpToolException.invalidParams("invalid_tool_arguments", e.getMessage());
+        } catch (NotFoundException | NoSuchElementException e) {
+            throw McpToolException.notFound(
+                "document_resource_not_found",
+                "The requested document session or revision was not found."
+            );
+        } catch (ConflictException e) {
+            log.warn("Tool '{}' rejected the request: {}", name, e.getMessage());
+            throw McpToolException.conflict("document_action_conflict", e.getMessage());
         } catch (Exception e) {
             log.error("Tool '{}' threw an error", name, e);
-            throw new RuntimeException("Tool execution failed: " + e.getMessage(), e);
+            throw McpToolException.internal("document_action_failed", internalToolMessage(name), e);
         }
 
         // Convert result to MCP content format
@@ -250,6 +281,36 @@ public class McpController {
         error.put("code", code);
         error.put("message", message);
         return response;
+    }
+
+    private ObjectNode errorResponse(JsonNode id, int code, String message, JsonNode data) {
+        ObjectNode response = errorResponse(id, code, message);
+        if (data != null && response.has("error")) {
+            response.with("error").set("data", data);
+        }
+        return response;
+    }
+
+    private ObjectNode errorData(String code, int httpStatus, String userMessage, List<String> items, boolean retryable) {
+        ObjectNode data = objectMapper.createObjectNode();
+        data.put("code", code);
+        data.put("http_status", httpStatus);
+        data.put("user_message", userMessage);
+        data.put("retryable", retryable);
+        if (items != null && !items.isEmpty()) {
+            ArrayNode itemArray = data.putArray("items");
+            items.forEach(itemArray::add);
+        }
+        return data;
+    }
+
+    private String internalToolMessage(String toolName) {
+        return switch (toolName) {
+            case "propose_document_edit" -> "Could not stage the document edit right now. Please try again.";
+            case "apply_document_edit" -> "Could not apply the revision right now. Please try again.";
+            case "review_pending_revision" -> "Could not load the revision review right now. Please try again.";
+            default -> "The document action could not be completed right now. Please try again.";
+        };
     }
 
     // ─── internal exception ───────────────────────────────────────────────────

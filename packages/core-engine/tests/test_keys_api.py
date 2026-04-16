@@ -102,3 +102,29 @@ def test_resetting_endpoint_override_keeps_existing_key(tmp_path: Path, monkeypa
         env_text = env_path.read_text(encoding="utf-8")
         assert "OPENAI_API_KEY=encrypted:" in env_text
         assert "OPENAI_BASE_URL=" not in env_text
+
+
+def test_nvidia_provider_can_store_key_and_uses_default_endpoint(tmp_path: Path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(keys_api, "_get_env_path", lambda: env_path)
+
+    with TestClient(build_keys_app()) as client:
+        save_response = client.post(
+            "/api/keys/set",
+            json={
+                "provider": "nvidia",
+                "key": "nvapi-test-key",
+            },
+        )
+        assert save_response.status_code == 200
+        body = save_response.json()
+        assert body["provider"] == "nvidia"
+        assert body["has_key"] is True
+        assert body["endpoint"] is None
+        assert body["resolved_endpoint"] == "https://integrate.api.nvidia.com/v1"
+
+        list_response = client.get("/api/keys/list")
+        assert list_response.status_code == 200
+        providers = {entry["provider"]: entry for entry in list_response.json()["providers"]}
+        assert providers["nvidia"]["has_key"] is True
+        assert providers["nvidia"]["resolved_endpoint"] == "https://integrate.api.nvidia.com/v1"

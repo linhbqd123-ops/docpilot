@@ -19,6 +19,22 @@ function sanitizeHtml(html: string) {
   return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
 }
 
+function serializeEmbeddedStyles(parsed: Document) {
+  const seen = new Set<string>();
+
+  return Array.from(parsed.querySelectorAll("style"))
+    .map((style) => style.textContent?.trim() ?? "")
+    .filter((css) => {
+      if (!css || seen.has(css)) {
+        return false;
+      }
+      seen.add(css);
+      return true;
+    })
+    .map((css, index) => `<style data-docpilot-source-style="${index + 1}">${css.replaceAll("</style>", "<\\/style>")}</style>`)
+    .join("");
+}
+
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -113,6 +129,9 @@ export function normalizeDocumentHtml(rawHtml: string) {
   const source = rawHtml.trim() ? rawHtml : "<p></p>";
   const parsed = parser.parseFromString(source, "text/html");
   const body = parsed.body;
+  const embeddedStyles = serializeEmbeddedStyles(parsed);
+  const stylelessBody = body.cloneNode(true) as HTMLBodyElement;
+  stylelessBody.querySelectorAll("style").forEach((style) => style.remove());
   const outline: OutlineItem[] = [];
 
   body.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6").forEach((heading, index) => {
@@ -136,8 +155,8 @@ export function normalizeDocumentHtml(rawHtml: string) {
     ensureNodeIdentity(node, `block-${index + 1}`);
   });
 
-  const html = sanitizeHtml(body.innerHTML);
-  const text = body.textContent ?? "";
+  const html = `${embeddedStyles}${sanitizeHtml(stylelessBody.innerHTML)}`;
+  const text = stylelessBody.textContent ?? "";
 
   return {
     html,
@@ -159,6 +178,7 @@ export async function createDocumentFromFile(file: File): Promise<DocumentRecord
       size: file.size,
       status: "needs_backend",
       html: "",
+      sourceHtml: null,
       outline: [],
       wordCount: 0,
       createdAt: timestamp,
@@ -193,6 +213,7 @@ export async function createDocumentFromFile(file: File): Promise<DocumentRecord
     size: file.size,
     status: "ready",
     html: normalized.html,
+    sourceHtml: null,
     outline: normalized.outline,
     wordCount: normalized.wordCount,
     createdAt: timestamp,
@@ -209,8 +230,42 @@ export async function createDocumentFromFile(file: File): Promise<DocumentRecord
 export function applyDocumentProjection(
   document: DocumentRecord,
   rawHtml: string,
-  patch: Partial<DocumentRecord> = {},
+  patch: Partial<DocumentRecord> & {
+    displayMode?: "projection" | "preserve" | "restore_source";
+  } = {},
 ): DocumentRecord {
+  const { displayMode = "projection", ...recordPatch } = patch;
+  const normalizedSource = typeof recordPatch.sourceHtml === "string" && recordPatch.sourceHtml.trim()
+    ? normalizeDocumentHtml(recordPatch.sourceHtml)
+    : null;
+  const nextRecordPatch: Partial<DocumentRecord> = {
+    ...recordPatch,
+    ...(recordPatch.sourceHtml !== undefined ? { sourceHtml: normalizedSource?.html ?? null } : {}),
+  };
+
+  if (displayMode === "preserve") {
+    return {
+      ...document,
+      updatedAt: Date.now(),
+      ...nextRecordPatch,
+    };
+  }
+
+  const sourceSnapshot = normalizedSource?.html ?? document.sourceHtml;
+
+  if (displayMode === "restore_source" && sourceSnapshot) {
+    const sourceView = normalizeDocumentHtml(sourceSnapshot);
+
+    return {
+      ...document,
+      html: sourceView.html,
+      outline: sourceView.outline,
+      wordCount: sourceView.wordCount,
+      updatedAt: Date.now(),
+      ...nextRecordPatch,
+    };
+  }
+
   const normalized = normalizeDocumentHtml(rawHtml);
 
   return {
@@ -219,7 +274,7 @@ export function applyDocumentProjection(
     outline: normalized.outline,
     wordCount: normalized.wordCount,
     updatedAt: Date.now(),
-    ...patch,
+      ...nextRecordPatch,
   };
 }
 
@@ -285,6 +340,7 @@ export function rehydrateDocument(document: DocumentRecord): DocumentRecord {
   return {
     ...document,
     html: normalized?.html ?? document.html,
+    sourceHtml: document.sourceHtml ? normalizeDocumentHtml(document.sourceHtml).html : null,
     outline: normalized?.outline ?? document.outline,
     wordCount: normalized?.wordCount ?? document.wordCount,
     baseRevisionId: document.baseRevisionId ?? null,

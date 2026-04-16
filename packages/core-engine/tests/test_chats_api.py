@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -197,9 +198,39 @@ def test_chat_message_metadata_round_trips_without_being_dropped(tmp_path: Path)
                         "content": "Summary ready.",
                         "createdAt": 1712000000000,
                         "status": "sent",
+                        "mode": "ask",
+                        "usage": {
+                            "requestCount": 1,
+                            "estimatedInputTokens": 120,
+                            "estimatedOutputTokens": 24,
+                            "estimatedTotalTokens": 144,
+                            "requests": [
+                                {
+                                    "requestIndex": 1,
+                                    "phase": "compose_answer",
+                                    "provider": "ollama",
+                                    "providerDisplayName": "Ollama (local)",
+                                    "model": "llama3.2",
+                                    "inputChars": 420,
+                                    "outputChars": 87,
+                                    "estimatedInputTokens": 120,
+                                    "estimatedOutputTokens": 24,
+                                    "estimatedTotalTokens": 144,
+                                }
+                            ],
+                        },
                         "toolActivity": [
                             {"event": "tool_started", "tool": "answer_about_document"},
-                            {"event": "tool_finished", "tool": "llm_inference", "phase": "compose_answer"},
+                            {
+                                "event": "tool_finished",
+                                "tool": "llm_inference",
+                                "phase": "compose_answer",
+                                "requestIndex": 1,
+                                "provider": "ollama",
+                                "providerDisplayName": "Ollama (local)",
+                                "model": "llama3.2",
+                                "estimatedTotalTokens": 144,
+                            },
                         ],
                         "notices": [
                             {"code": "agent_risks", "items": ["Verify the timeline before export."]}
@@ -214,9 +245,62 @@ def test_chat_message_metadata_round_trips_without_being_dropped(tmp_path: Path)
         assert saved["messages"][0]["toolActivity"][0]["tool"] == "answer_about_document"
         assert saved["messages"][0]["toolActivity"][1]["phase"] == "compose_answer"
         assert saved["messages"][0]["notices"][0]["code"] == "agent_risks"
+        assert saved["messages"][0]["usage"]["estimatedTotalTokens"] == 144
+        assert saved["messages"][0]["mode"] == "ask"
 
         reloaded = client.get("/api/chats/chat-with-metadata")
         assert reloaded.status_code == 200
         payload = reloaded.json()["chat"]
         assert payload["messages"][0]["toolActivity"][0]["event"] == "tool_started"
         assert payload["messages"][0]["notices"][0]["items"] == ["Verify the timeline before export."]
+        assert payload["messages"][0]["usage"]["requests"][0]["model"] == "llama3.2"
+
+
+def test_store_reinitializes_cleanly_after_database_files_are_removed(tmp_path: Path) -> None:
+    database_path = tmp_path / "docpilot.db"
+    store = SQLiteChatStore(database_path)
+    store.create_or_replace_chat(
+        chat_id="chat-before-reset",
+        name="Before reset",
+        document_id="doc-reset",
+        messages=[],
+    )
+
+    for path in (
+        database_path,
+        Path(f"{database_path}-wal"),
+        Path(f"{database_path}-shm"),
+    ):
+        if path.exists():
+            path.unlink()
+
+    Path(f"{database_path}-wal").write_text("stale wal", encoding="utf-8")
+    Path(f"{database_path}-shm").write_text("stale shm", encoding="utf-8")
+
+    reloaded = SQLiteChatStore(database_path)
+
+    assert database_path.exists()
+    assert reloaded.list_chats() == []
+
+
+def test_list_chats_does_not_reconfigure_journal_mode_on_every_connection(tmp_path: Path) -> None:
+    database_path = tmp_path / "docpilot.db"
+    store = SQLiteChatStore(database_path)
+    store.create_or_replace_chat(
+        chat_id="chat-read-while-write-lock",
+        name="Concurrent read",
+        document_id="doc-concurrency",
+        messages=[],
+    )
+
+    writer = sqlite3.connect(database_path, timeout=0.1, check_same_thread=False)
+    writer.execute("PRAGMA busy_timeout = 100")
+    writer.execute("BEGIN IMMEDIATE")
+
+    try:
+        chats = store.list_chats()
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert [chat["id"] for chat in chats] == ["chat-read-while-write-lock"]

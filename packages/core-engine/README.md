@@ -5,7 +5,7 @@
 ## Responsibilities
 
 - Expose REST endpoints for chat, agent turns, document import/export, health, and key storage.
-- Route model requests to providers such as Ollama, OpenAI, Anthropic, Groq, Azure OpenAI, and other OpenAI-compatible endpoints.
+- Route model requests to providers such as Ollama, OpenAI, Anthropic, Groq, NVIDIA, Azure OpenAI, and other OpenAI-compatible endpoints.
 - Call `doc-mcp` for canonical document operations.
 - Persist chat state locally.
 
@@ -126,7 +126,7 @@ Notes:
 
 - `tool_started` / `tool_finished` can represent both document-engine steps and model phases. The backend now emits `llm_inference` with phases such as `compose_answer` and `plan_revision` so the UI can render Copilot-style inference progress.
 - Ask turns stream provider output token by token through `assistant_delta` instead of waiting for a full non-streaming response.
-- If `answer_about_document` returns no useful snippets, the backend falls back to the current HTML projection text and emits `get_html_projection` activity before composing the answer.
+- If `answer_about_document` returns no useful snippets, the backend falls back to compact analysis HTML derived from the imported DOCX and emits `get_analysis_html` activity before composing the answer.
 - Edit turns first run a deterministic target-resolution pass. When the raw prompt search misses, the orchestrator extracts source/section hints such as quoted text or `replace X in Y with Z`, calls `locate_relevant_context` for those hints, and loads nearby block windows before asking the model to plan patch operations.
 
 ## Environment variables
@@ -139,7 +139,16 @@ See `.env.example` for all options. Key ones:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Model to use |
 | `OPENAI_API_KEY` | *(empty)* | Required for OpenAI provider |
+| `NVIDIA_API_KEY` | *(empty)* | Required for NVIDIA provider |
 | `ANTHROPIC_API_KEY` | *(empty)* | Required for Anthropic provider |
+
+## Debug traces
+
+`core-engine` now writes detailed JSONL traces to `packages/core-engine/debug/core-engine-flow.jsonl`.
+
+- Each request carries `X-DocPilot-Trace-Id` so a single turn can be correlated across desktop, core-engine, and doc-mcp logs.
+- Frontend-originated debug events are persisted to `packages/desktop/debug/desktop-flow.jsonl` through `POST /api/debug/frontend`.
+- LLM requests are logged with the full prompt/messages assembled by the orchestrator, plus full model outputs and doc-mcp request/response payloads.
 
 ## Frontend integration notes
 

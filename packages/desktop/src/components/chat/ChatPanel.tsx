@@ -1,7 +1,9 @@
-import { AlertTriangle, ArrowLeft, Bot, CheckCircle2, LoaderCircle, Plus, RotateCcw, Send, Square, User, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Bot, CheckCircle2, ChevronDown, ChevronRight, LoaderCircle, Plus, RotateCcw, Send, Square, User, X } from "lucide-react";
 
-import type { AgentNotice, ChatMessage, ToolActivity } from "@/app/types";
+import type { AgentNotice, AppSettings, ChatMessage, ChatMode, ToolActivity, TurnUsage, TurnUsageRequest } from "@/app/types";
 import { useAppContext } from "@/app/context";
+import Dropdown from "@/components/ui/Dropdown";
+import { getProviderDefinition } from "@/lib/providers";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { useState, useRef, useEffect } from "react";
 
@@ -28,12 +30,84 @@ interface InferenceStep {
   status: "running" | "completed";
 }
 
+const compactNumberFormatter = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 function asString(value: unknown) {
   return typeof value === "string" && value.trim() ? value : "";
 }
 
 function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatCompactMetric(value: number) {
+  return compactNumberFormatter.format(value);
+}
+
+function formatTokenEstimate(value: number) {
+  return `~${formatCompactMetric(value)} tok total`;
+}
+
+function formatTokenBreakdown(parts: {
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedTotalTokens: number;
+}) {
+  const segments: string[] = [];
+
+  if (parts.estimatedInputTokens > 0) {
+    segments.push(`in ~${formatCompactMetric(parts.estimatedInputTokens)}`);
+  }
+
+  if (parts.estimatedOutputTokens > 0) {
+    segments.push(`out ~${formatCompactMetric(parts.estimatedOutputTokens)}`);
+  }
+
+  if (parts.estimatedTotalTokens > 0) {
+    segments.push(`total ~${formatCompactMetric(parts.estimatedTotalTokens)}`);
+  }
+
+  return segments.join(" · ");
+}
+
+function formatRequestCount(value: number) {
+  return `${value} AI req${value === 1 ? "" : "s"}`;
+}
+
+function estimateTokenCount(text: string) {
+  const normalized = text.trim();
+  if (!normalized) {
+    return 0;
+  }
+
+  return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function estimateThreadChars(messages: ChatMessage[]) {
+  return messages.reduce((total, message) => total + message.content.length, 0);
+}
+
+function estimateThreadTokens(messages: ChatMessage[]) {
+  return messages.reduce((total, message) => total + estimateTokenCount(message.content), 0);
+}
+
+function modeLabel(mode: ChatMode) {
+  return mode === "agent" ? "Agent" : "Ask";
+}
+
+function phaseLabel(phase: string) {
+  if (phase === "compose_answer") {
+    return "Answer generation";
+  }
+
+  if (phase === "plan_revision") {
+    return "Revision planning";
+  }
+
+  return startCase(phase || "model inference");
 }
 
 function startCase(value: string) {
@@ -46,6 +120,7 @@ function activityKey(activity: ToolActivity) {
   return [
     asString(activity.tool) || "tool",
     asString(activity.phase),
+    asString(activity.requestIndex ?? activity.request_index),
     asString(activity.blockId ?? activity.block_id),
     asString(activity.revisionId ?? activity.revision_id),
   ].join(":");
@@ -64,8 +139,14 @@ function activityLabel(activity: ToolActivity) {
   if (tool === "answer_about_document") {
     return "Scanned relevant document context";
   }
+  if (tool === "get_source_html") {
+    return "Loaded fidelity source HTML";
+  }
+  if (tool === "get_analysis_html") {
+    return "Loaded analysis HTML";
+  }
   if (tool === "get_html_projection") {
-    return "Read document projection";
+    return "Read document projection (legacy)";
   }
   if (tool === "inspect_document") {
     return "Inspected document structure";
@@ -73,11 +154,17 @@ function activityLabel(activity: ToolActivity) {
   if (tool === "locate_relevant_context") {
     return "Located relevant sections";
   }
-  if (tool === "llm_inference" && phase === "compose_answer") {
-    return "Generating answer";
-  }
-  if (tool === "llm_inference" && phase === "plan_revision") {
-    return "Planning structured edits";
+  if (tool === "llm_inference") {
+    const requestIndex = asNumber(activity.requestIndex ?? activity.request_index);
+    const providerDisplayName = asString(activity.providerDisplayName ?? activity.provider_display_name);
+    const model = asString(activity.model);
+    const target = [providerDisplayName, model].filter(Boolean).join(" / ");
+
+    if (requestIndex !== null) {
+      return target ? `API request #${requestIndex} · ${target}` : `API request #${requestIndex}`;
+    }
+
+    return target ? `API request · ${target}` : `API request · ${phaseLabel(phase)}`;
   }
   if (tool === "propose_document_edit") {
     return "Staged revision proposal";
@@ -113,13 +200,40 @@ function activityDetail(activity: ToolActivity) {
     return sectionCount !== null ? `${sectionCount} sections detected` : "";
   }
 
-  if (tool === "get_html_projection" && event === "tool_finished") {
-    return "Fallback text loaded from the current document projection";
+  if (tool === "get_source_html" && event === "tool_finished") {
+    return "Full-fidelity source HTML loaded from the active document session";
   }
 
-  if (tool === "llm_inference" && event === "tool_finished") {
+  if (tool === "get_analysis_html" && event === "tool_finished") {
+    return "Compact analysis HTML loaded for additional AI context";
+  }
+
+  if (tool === "get_html_projection" && event === "tool_finished") {
+    return "Legacy projection HTML loaded";
+  }
+
+  if (tool === "llm_inference") {
+    const parts = [phaseLabel(asString(activity.phase))];
+    const estimatedInputTokens = asNumber(activity.estimatedInputTokens ?? activity.estimated_input_tokens) ?? 0;
+    const estimatedOutputTokens = asNumber(activity.estimatedOutputTokens ?? activity.estimated_output_tokens) ?? 0;
+    const estimatedTotalTokens = asNumber(activity.estimatedTotalTokens ?? activity.estimated_total_tokens);
     const charCount = asNumber(activity.charCount);
-    return charCount !== null ? `${charCount} chars generated` : "";
+
+    if (estimatedTotalTokens !== null && estimatedTotalTokens > 0) {
+      parts.push(
+        formatTokenBreakdown({
+          estimatedInputTokens,
+          estimatedOutputTokens,
+          estimatedTotalTokens,
+        }),
+      );
+    }
+
+    if (charCount !== null && charCount > 0) {
+      parts.push(`${formatCompactMetric(charCount)} chars`);
+    }
+
+    return parts.join(" · ");
   }
 
   if (tool === "propose_document_edit" && event === "tool_finished") {
@@ -179,6 +293,166 @@ function noticeText(notice: AgentNotice) {
   return [notice.message, ...(notice.items ?? [])].filter(Boolean).join("\n").trim();
 }
 
+function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number): TurnUsageRequest | null {
+  if (asString(activity.tool) !== "llm_inference" || asString(activity.event) !== "tool_finished") {
+    return null;
+  }
+
+  const requestIndex = asNumber(activity.requestIndex ?? activity.request_index) ?? fallbackIndex;
+
+  return {
+    requestIndex,
+    phase: asString(activity.phase) || null,
+    provider: asString(activity.provider) || undefined,
+    providerDisplayName: asString(activity.providerDisplayName ?? activity.provider_display_name) || undefined,
+    model: asString(activity.model) || null,
+    inputChars: asNumber(activity.inputChars ?? activity.input_chars) ?? 0,
+    outputChars: asNumber(activity.outputChars ?? activity.output_chars) ?? asNumber(activity.charCount) ?? 0,
+    estimatedInputTokens: asNumber(activity.estimatedInputTokens ?? activity.estimated_input_tokens) ?? 0,
+    estimatedOutputTokens: asNumber(activity.estimatedOutputTokens ?? activity.estimated_output_tokens) ?? 0,
+    estimatedTotalTokens: asNumber(activity.estimatedTotalTokens ?? activity.estimated_total_tokens) ?? 0,
+  };
+}
+
+function usageFromToolActivity(activities: ToolActivity[] | undefined): TurnUsage | undefined {
+  let fallbackIndex = 0;
+  const requests = (activities ?? [])
+    .map((activity) => {
+      if (asString(activity.tool) !== "llm_inference" || asString(activity.event) !== "tool_finished") {
+        return null;
+      }
+
+      fallbackIndex += 1;
+      return usageRequestFromActivity(activity, fallbackIndex);
+    })
+    .filter((request): request is TurnUsageRequest => request !== null)
+    .sort((left, right) => left.requestIndex - right.requestIndex);
+
+  if (requests.length === 0) {
+    return undefined;
+  }
+
+  return {
+    requestCount: requests.length,
+    estimatedInputTokens: requests.reduce((total, request) => total + request.estimatedInputTokens, 0),
+    estimatedOutputTokens: requests.reduce((total, request) => total + request.estimatedOutputTokens, 0),
+    estimatedTotalTokens: requests.reduce((total, request) => total + request.estimatedTotalTokens, 0),
+    requests,
+  };
+}
+
+function fallbackMessageUsage(message: ChatMessage, history: ChatMessage[], settings?: AppSettings): TurnUsage | undefined {
+  if (!settings || (message.role !== "assistant" && message.role !== "error")) {
+    return undefined;
+  }
+
+  const hasInferenceTrace = (message.toolActivity ?? []).some((activity) => asString(activity.tool) === "llm_inference");
+  if (!message.content.trim() && !hasInferenceTrace) {
+    return undefined;
+  }
+
+  const providerDefinition = getProviderDefinition(settings.provider);
+  const inputChars = estimateThreadChars(history);
+  const outputChars = message.content.length;
+  const estimatedInputTokens = estimateThreadTokens(history);
+  const estimatedOutputTokens = estimateTokenCount(message.content);
+  const llmActivity = [...(message.toolActivity ?? [])].reverse().find((activity) => asString(activity.tool) === "llm_inference");
+  const phase = asString(llmActivity?.phase) || (message.mode === "agent" ? "plan_revision" : "compose_answer");
+
+  return {
+    requestCount: 1,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedTotalTokens: estimatedInputTokens + estimatedOutputTokens,
+    requests: [
+      {
+        requestIndex: 1,
+        phase,
+        provider: settings.provider,
+        providerDisplayName: providerDefinition?.label ?? settings.provider,
+        model: settings.modelOverride.trim() || providerDefinition?.defaultModel || null,
+        inputChars,
+        outputChars,
+        estimatedInputTokens,
+        estimatedOutputTokens,
+        estimatedTotalTokens: estimatedInputTokens + estimatedOutputTokens,
+      },
+    ],
+  };
+}
+
+function messageUsage(message: ChatMessage, history: ChatMessage[] = [], settings?: AppSettings): TurnUsage | undefined {
+  if (message.usage && (message.usage.requestCount > 0 || message.usage.estimatedTotalTokens > 0)) {
+    return message.usage;
+  }
+
+  return usageFromToolActivity(message.toolActivity) ?? fallbackMessageUsage(message, history, settings);
+}
+
+function summarizeChatUsage(messages: ChatMessage[], settings?: AppSettings): TurnUsage | undefined {
+  const requests: TurnUsageRequest[] = [];
+
+  messages.forEach((message, index) => {
+    const usage = messageUsage(message, messages.slice(0, index), settings);
+    if (!usage) {
+      return;
+    }
+
+    usage.requests.forEach((request) => requests.push(request));
+  });
+
+  if (requests.length === 0) {
+    return undefined;
+  }
+
+  return {
+    requestCount: requests.length,
+    estimatedInputTokens: requests.reduce((total, request) => total + request.estimatedInputTokens, 0),
+    estimatedOutputTokens: requests.reduce((total, request) => total + request.estimatedOutputTokens, 0),
+    estimatedTotalTokens: requests.reduce((total, request) => total + request.estimatedTotalTokens, 0),
+    requests,
+  };
+}
+
+function requestTargetLabel(request: TurnUsageRequest) {
+  const provider = request.providerDisplayName || request.provider || "AI model";
+  return request.model ? `${provider} / ${request.model}` : provider;
+}
+
+function summarizeRequestTargets(usage: TurnUsage | undefined) {
+  if (!usage?.requests.length) {
+    return "";
+  }
+
+  const uniqueTargets = Array.from(new Set(usage.requests.map(requestTargetLabel).filter(Boolean)));
+  if (uniqueTargets.length === 0) {
+    return "";
+  }
+
+  if (uniqueTargets.length === 1) {
+    return uniqueTargets[0];
+  }
+
+  return `${uniqueTargets[0]} +${uniqueTargets.length - 1}`;
+}
+
+function usageSummaryText(usage: TurnUsage | undefined) {
+  if (!usage || usage.requestCount <= 0) {
+    return "";
+  }
+
+  const parts = [formatRequestCount(usage.requestCount)];
+  if (usage.estimatedTotalTokens > 0) {
+    parts.push(formatTokenEstimate(usage.estimatedTotalTokens));
+  }
+
+  return parts.join(" · ");
+}
+
+function hasTokenEstimate(usage: TurnUsage | undefined) {
+  return Boolean(usage && usage.estimatedTotalTokens > 0);
+}
+
 export function ChatPanel() {
   const {
     state,
@@ -198,6 +472,7 @@ export function ChatPanel() {
 
   const [inputHeight, setInputHeight] = useState(140); // Default height for input area
   const [isResizing, setIsResizing] = useState(false);
+  const [expandedTraceIds, setExpandedTraceIds] = useState<Record<string, boolean>>({});
   const dividerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -207,6 +482,7 @@ export function ChatPanel() {
       .sort((left, right) => right.updatedAt - left.updatedAt)
     : [];
   const isDetailView = Boolean(selectedChat);
+  const selectedChatUsage = selectedChat ? summarizeChatUsage(currentMessages, state.settings) : undefined;
 
   // Handle vertical resize of input area
   useEffect(() => {
@@ -236,6 +512,23 @@ export function ChatPanel() {
     };
   }, [isResizing]);
 
+  useEffect(() => {
+    setExpandedTraceIds((current) => {
+      let nextState = current;
+
+      currentMessages.forEach((message) => {
+        if ((message.role === "assistant" || message.role === "error") && message.status === "streaming" && current[message.id] === undefined) {
+          if (nextState === current) {
+            nextState = { ...current };
+          }
+          nextState[message.id] = true;
+        }
+      });
+
+      return nextState;
+    });
+  }, [currentMessages]);
+
   const canSend =
     Boolean(selectedDocument) &&
     selectedDocument?.status === "ready" &&
@@ -244,21 +537,29 @@ export function ChatPanel() {
     Boolean(state.composerValue.trim()) &&
     !state.isSending;
 
-  const helperText = !selectedDocument
-    ? "Select or import a document to start an editing session."
-    : selectedDocument.status !== "ready"
-      ? "This document needs the backend import endpoint before DocPilot can edit it."
-      : !selectedDocument.documentSessionId
-        ? "This document can be edited locally, but AI review/apply requires a session-backed DOCX import."
-        : !state.settings.apiBaseUrl.trim()
-          ? "This build is missing the core engine configuration."
-          : isDetailView
-            ? "Continue the selected chat using the active provider."
-            : "Select a saved chat or send a message to start a new chat.";
+  const composerPlaceholder = state.settings.mode === "ask"
+    ? (isDetailView ? "Ask about this document..." : "Ask about this document to start a chat...")
+    : (isDetailView ? "Tell Agent what to change..." : "Describe the edit you want to stage...");
 
-  const composerPlaceholder = isDetailView
-    ? "Continue the current chat..."
-    : "Send a first message to create a new chat...";
+  const modeItems = [
+    {
+      value: "agent",
+      label: "Agent",
+      description: "Inspect the document and stage structured edits.",
+    },
+    {
+      value: "ask",
+      label: "Ask",
+      description: "Read-only answers from the current document context.",
+    },
+  ];
+
+  function toggleTrace(messageId: string) {
+    setExpandedTraceIds((current) => ({
+      ...current,
+      [messageId]: !(current[messageId] ?? false),
+    }));
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col" ref={containerRef}>
@@ -274,10 +575,15 @@ export function ChatPanel() {
                   onClick={() => selectChat(null)}
                   title="Back to chat history"
                 >
-                  <ArrowLeft size={14} /> Back
+                  <ArrowLeft size={14} />
                 </button>
                 <div className="min-w-0">
                   <h2 className="truncate text-lg font-semibold text-docpilot-textStrong">{selectedChat.name}</h2>
+                  {selectedChatUsage ? (
+                    <p className="mt-1 text-xs text-docpilot-muted">
+                      {usageSummaryText(selectedChatUsage)}
+                    </p>
+                  ) : null}
                 </div>
               </div>
             ) : (
@@ -302,7 +608,7 @@ export function ChatPanel() {
                   onClick={() => clearChat()}
                   title="Clear the current thread"
                 >
-                  <RotateCcw size={14} /> Clear
+                  <RotateCcw size={14} />
                 </button>
                 <button
                   type="button"
@@ -310,35 +616,10 @@ export function ChatPanel() {
                   onClick={() => createNewChat()}
                   title="Create a new chat for this document"
                 >
-                  <Plus size={14} /> New Chat
+                  <Plus size={14} />
                 </button>
               </>
             ) : null}
-            {/* Mode switch (Agent / Ask) - styled like a compact segmented control */}
-            <div className="inline-flex items-center gap-1 rounded-full border border-docpilot-border bg-docpilot-panelAlt p-1 text-xs">
-              <button
-                type="button"
-                onClick={() => updateSettings({ mode: "agent" })}
-                className={cn(
-                  "px-2 py-1 rounded-full",
-                  state.settings.mode === "agent" ? "bg-docpilot-accent/20 text-docpilot-textStrong" : "text-docpilot-muted",
-                )}
-                title="Agent mode — document-aware assistant"
-              >
-                DocPilot
-              </button>
-              <button
-                type="button"
-                onClick={() => updateSettings({ mode: "ask" })}
-                className={cn(
-                  "px-2 py-1 rounded-full",
-                  state.settings.mode === "ask" ? "bg-docpilot-accent/20 text-docpilot-textStrong" : "text-docpilot-muted",
-                )}
-                title="Ask mode — quick Q&A"
-              >
-                Ask
-              </button>
-            </div>
             <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
               <span
                 className={cn(
@@ -376,9 +657,10 @@ export function ChatPanel() {
               <div className="space-y-2">
                 {documentChats.map((chat) => {
                   const lastMessage = chat.messages[chat.messages.length - 1];
+                  const chatUsage = summarizeChatUsage(chat.messages, state.settings);
 
                   return (
-                    <div key={chat.id} className="panel-card flex items-start gap-3 p-3">
+                    <div key={chat.id} className="panel-card flex items-start gap-3 p-3 transition duration-150 hover:-translate-y-px hover:border-docpilot-accent/30 hover:shadow-active">
                       <button
                         type="button"
                         className="min-w-0 flex-1 text-left"
@@ -386,7 +668,10 @@ export function ChatPanel() {
                       >
                         <p className="truncate text-sm font-medium text-docpilot-textStrong">{chat.name}</p>
                         <p className="mt-1 text-xs text-docpilot-muted">
-                          {chat.messages.length} message{chat.messages.length === 1 ? "" : "s"} · Updated {formatRelativeTime(chat.updatedAt)}
+                          {chat.messages.length} message{chat.messages.length === 1 ? "" : "s"}
+                          {chatUsage ? ` · ${formatRequestCount(chatUsage.requestCount)}` : ""}
+                          {chatUsage && hasTokenEstimate(chatUsage) ? ` · ${formatTokenEstimate(chatUsage.estimatedTotalTokens)}` : ""}
+                          {` · Updated ${formatRelativeTime(chat.updatedAt)}`}
                         </p>
                         <p className="mt-2 text-xs text-docpilot-muted">
                           {lastMessage?.content
@@ -421,12 +706,17 @@ export function ChatPanel() {
           </div>
         ) : null}
 
-        {selectedChat && currentMessages.map((message) => {
+        {selectedChat && currentMessages.map((message, index) => {
           const isUser = message.role === "user";
           const isError = message.role === "error";
           const inferenceSteps = buildInferenceSteps(message.toolActivity);
           const activeStep = activeInferenceLabel(message);
+          const usage = messageUsage(message, currentMessages.slice(0, index), state.settings);
           const noticeTexts = (message.notices ?? []).map(noticeText).filter(Boolean);
+          const targetSummary = summarizeRequestTargets(usage);
+          const hasTraceDetails = !isUser && (inferenceSteps.length > 0 || noticeTexts.length > 0 || Boolean(usage?.requests.length));
+          const traceExpanded = expandedTraceIds[message.id] ?? false;
+          const showMessageMeta = !isUser && Boolean(message.mode || targetSummary || usage?.requestCount || hasTokenEstimate(usage) || hasTraceDetails);
           const messageBody = message.content || (message.status === "streaming" && inferenceSteps.length === 0 ? "Waiting for response..." : "");
 
           return (
@@ -473,10 +763,74 @@ export function ChatPanel() {
                         : "border-docpilot-border bg-docpilot-panelAlt text-docpilot-text",
                   )}
                 >
-                  {!isUser && !isError && (inferenceSteps.length > 0 || noticeTexts.length > 0) ? (
-                    <div className="mb-3 space-y-2 rounded-xl border border-docpilot-border bg-docpilot-surface px-3 py-3">
+                  {showMessageMeta ? (
+                    <div className="mb-3 flex flex-wrap items-start justify-between gap-3 border-b border-docpilot-border/70 pb-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {message.mode ? (
+                          <span className="rounded-full border border-docpilot-border bg-docpilot-surface px-2.5 py-1 text-[11px] font-medium text-docpilot-textStrong">
+                            {modeLabel(message.mode)}
+                          </span>
+                        ) : null}
+                        {targetSummary ? (
+                          <span className="rounded-full border border-docpilot-border bg-docpilot-surface px-2.5 py-1 text-[11px] text-docpilot-muted">
+                            {targetSummary}
+                          </span>
+                        ) : null}
+                        {usage?.requestCount ? (
+                          <span className="rounded-full border border-docpilot-border bg-docpilot-surface px-2.5 py-1 text-[11px] text-docpilot-muted">
+                            {formatRequestCount(usage.requestCount)}
+                          </span>
+                        ) : null}
+                        {hasTokenEstimate(usage) ? (
+                          <span className="rounded-full border border-docpilot-border bg-docpilot-surface px-2.5 py-1 text-[11px] text-docpilot-muted">
+                            {usage ? formatTokenEstimate(usage.estimatedTotalTokens) : ""}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {hasTraceDetails ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleTrace(message.id)}
+                          className="inline-flex items-center gap-1 rounded-xl border border-docpilot-border bg-docpilot-surface px-3 py-1.5 text-[11px] font-medium text-docpilot-muted transition duration-150 hover:-translate-y-px hover:border-docpilot-accent/30 hover:bg-docpilot-hover hover:text-docpilot-textStrong active:translate-y-0 active:scale-[0.99]"
+                        >
+                          {traceExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                          Execution details
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {!isUser && hasTraceDetails && traceExpanded ? (
+                    <div className="mb-3 space-y-3 rounded-2xl border border-docpilot-border bg-docpilot-surface px-3 py-3 shadow-sm">
+                      {usage?.requests.length ? (
+                        <div className="grid gap-2">
+                          {usage.requests.map((request) => (
+                            <div
+                              key={`${message.id}-request-${request.requestIndex}`}
+                              className="rounded-xl border border-docpilot-border/80 bg-docpilot-panel px-3 py-2 transition duration-150 hover:border-docpilot-accent/30"
+                            >
+                              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted">
+                                API request #{request.requestIndex}
+                              </p>
+                              <p className="mt-1 text-xs font-medium text-docpilot-textStrong">{requestTargetLabel(request)}</p>
+                              <p className="mt-1 text-xs text-docpilot-muted">
+                                {phaseLabel(request.phase ?? "")}
+                                {request.estimatedTotalTokens > 0
+                                  ? ` · ${formatTokenBreakdown({
+                                    estimatedInputTokens: request.estimatedInputTokens,
+                                    estimatedOutputTokens: request.estimatedOutputTokens,
+                                    estimatedTotalTokens: request.estimatedTotalTokens,
+                                  })}`
+                                  : ""}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
                       {inferenceSteps.length > 0 ? (
-                        <div className="space-y-2">
+                        <div className={cn("space-y-2", usage?.requests.length ? "border-t border-docpilot-border pt-3" : "") }>
                           {inferenceSteps.map((step) => (
                             <div key={step.key} className="flex items-start gap-2">
                               <span
@@ -501,7 +855,7 @@ export function ChatPanel() {
                       ) : null}
 
                       {noticeTexts.length > 0 ? (
-                        <div className={cn("space-y-2", inferenceSteps.length > 0 ? "border-t border-docpilot-border pt-2" : "")}>
+                        <div className={cn("space-y-2", inferenceSteps.length > 0 || usage?.requests.length ? "border-t border-docpilot-border pt-3" : "") }>
                           {noticeTexts.map((text, index) => (
                             <div
                               key={`${message.id}-notice-${index}`}
@@ -536,9 +890,23 @@ export function ChatPanel() {
       </div>
 
       <div className="border-t border-docpilot-border p-4 min-h-[220px]" style={{ height: `${inputHeight}px`, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div className="mb-3 flex items-center justify-between text-xs text-docpilot-muted">
-          <span>{helperText}</span>
-          {selectedDocument ? <span className="badge">{selectedDocument.name}</span> : null}
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-xs text-docpilot-muted">
+          <div className="flex flex-wrap items-center gap-2">
+            <Dropdown
+              items={modeItems}
+              value={state.settings.mode}
+              onChange={(value) => updateSettings({ mode: value as ChatMode })}
+              className="w-auto shrink-0"
+              buttonClassName={cn(
+                "min-h-[46px] rounded-2xl border-docpilot-border/90 bg-docpilot-surface transition duration-150 hover:-translate-y-px hover:border-docpilot-accent/30 hover:bg-docpilot-hover active:translate-y-0 active:scale-[0.99]",
+                state.isSending ? "pointer-events-none opacity-70" : "",
+              )}
+              menuClassName="rounded-2xl border-docpilot-border/90 bg-docpilot-panel shadow-glow"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedDocument ? <span className="badge">{selectedDocument.name}</span> : null}
+          </div>
         </div>
         <div className="rounded-2xl border border-docpilot-border bg-docpilot-panelAlt p-3 flex flex-col flex-1 min-h-0">
           <textarea
@@ -555,7 +923,9 @@ export function ChatPanel() {
           />
           <div className="mt-3 flex items-center justify-between gap-3 border-t border-docpilot-border pt-3">
             <p className="text-xs text-docpilot-muted">
-              Enter sends. Shift + Enter inserts a new line. Requests use the selected provider.
+              {state.settings.mode === "agent"
+                ? "Agent can inspect the document and stage structured edits. Enter sends. Shift + Enter inserts a new line."
+                : "Ask is read-only and answers from the current document context. Enter sends. Shift + Enter inserts a new line."}
             </p>
             <div className="flex items-center gap-2">
               {state.isSending ? (

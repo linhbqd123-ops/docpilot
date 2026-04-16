@@ -90,6 +90,8 @@ type Action =
     payload: {
       documentId: string;
       html: string;
+      sourceHtml?: string | null;
+      displayMode?: "projection" | "preserve" | "restore_source";
       session?: SessionSummary;
       revisions?: SessionRevisionSummary[];
       clearReview?: boolean;
@@ -370,7 +372,10 @@ export function appReducer(state: AppState, action: Action): AppState {
             return document;
           }
 
-          let nextDocument = applyDocumentProjection(document, action.payload.html);
+          let nextDocument = applyDocumentProjection(document, action.payload.html, {
+            sourceHtml: action.payload.sourceHtml,
+            displayMode: action.payload.displayMode,
+          });
 
           if (action.payload.session) {
             nextDocument = applyDocumentSessionSummary(

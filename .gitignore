@@ -85,13 +85,7 @@ ehthumbs.db
 *.tmp
 *.temp
 *.lock
-
-# --------------------
-# Project-specific runtime data (ignore uploads/logs)
-# --------------------
-doc-processor/data/uploads/
-doc-processor/logs/
-
 .venv/
+
 # Core engine runtime data
 packages/core-engine/data/docpilot.db*
