@@ -132,13 +132,15 @@ export interface Chat {
 
 export interface AppSettings {
   apiBaseUrl: string;
-  provider: "ollama" | "openai" | "groq" | "openrouter" | "together" | "zai" | "anthropic" | "azure" | "custom";
+  provider: "ollama" | "openai" | "groq" | "openrouter" | "together" | "nvidia" | "zai" | "anthropic" | "azure" | "custom";
   /** Optional model override — sent as the `model` field in /api/agent/turn requests.
    *  If empty, the backend uses its default model for the selected provider. */
   modelOverride: string;
   requestTimeoutMs: number;
   streaming: boolean;
   connectOnStartup: boolean;
+  /** Chat mode: 'agent' uses document-aware agent flows; 'ask' uses a simple Q&A mode. */
+  mode: "agent" | "ask";
   theme: ThemeMode;
 }
 

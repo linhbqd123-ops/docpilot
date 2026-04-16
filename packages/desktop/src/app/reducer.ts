@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   requestTimeoutMs: 30_000,
   streaming: true,
   connectOnStartup: false,
+  mode: "agent",
   theme: DEFAULT_THEME,
 };
 

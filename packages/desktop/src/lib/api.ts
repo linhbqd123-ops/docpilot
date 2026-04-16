@@ -15,6 +15,7 @@ import type {
   SessionSummary,
   ToolActivity,
 } from "@/app/types";
+import { createTraceId, logFrontendDebug } from "@/lib/debug";
 
 class ApiError extends Error {
   status?: number;
@@ -430,13 +431,15 @@ interface AgentTurnStreamCallbacks {
   onTextChunk?: (chunk: string) => void;
   onToolActivity?: (toolActivity: ToolActivity[]) => void;
   onNotice?: (notices: AgentNotice[]) => void;
+  traceId?: string;
+  apiBaseUrl?: string;
 }
 
 async function readAgentEventStream(
   response: Response,
   callbacks: AgentTurnStreamCallbacks = {},
 ): Promise<AgentTurnResponse> {
-  const { onTextChunk, onToolActivity, onNotice } = callbacks;
+  const { onTextChunk, onToolActivity, onNotice, traceId, apiBaseUrl } = callbacks;
   const reader = response.body?.getReader();
 
   if (!reader) {
@@ -486,6 +489,9 @@ async function readAgentEventStream(
       if (activity) {
         toolActivity.push(activity);
         onToolActivity?.([...toolActivity]);
+        if (traceId && apiBaseUrl) {
+          void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.tool_activity", activity);
+        }
       }
       return;
     }
@@ -493,11 +499,17 @@ async function readAgentEventStream(
     if (eventName === "notice") {
       notices.push(parseNotice(parsed));
       onNotice?.([...notices]);
+      if (traceId && apiBaseUrl) {
+        void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.notice", parsed);
+      }
       return;
     }
 
     if (eventName === "done") {
       finalPayload = parseAgentTurnResponse(parsed);
+      if (traceId && apiBaseUrl) {
+        void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.done", parsed);
+      }
     }
   };
 
@@ -530,6 +542,15 @@ async function readAgentEventStream(
     toolActivity: [],
     notices: [],
   };
+
+  if (traceId && apiBaseUrl) {
+    void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.resolved", {
+      ...resolved,
+      message: resolved.message || message,
+      toolActivity: resolved.toolActivity.length ? resolved.toolActivity : toolActivity,
+      notices: resolved.notices.length ? resolved.notices : notices,
+    });
+  }
 
   return {
     ...resolved,
@@ -600,13 +621,14 @@ export async function sendAgentTurnToBackend(args: {
     onNotice,
     signal,
   } = args;
+  const traceId = createTraceId();
 
   const payload = {
     provider: settings.provider,
     model: settings.modelOverride.trim() || undefined,
     chatId,
     documentSessionId,
-    mode: "agent",
+    mode: (settings as unknown as { mode?: string }).mode || "agent",
     baseRevisionId: currentRevisionId ?? undefined,
     prompt,
     workspaceContext: {
@@ -621,25 +643,54 @@ export async function sendAgentTurnToBackend(args: {
   };
 
   const endpoint = settings.streaming ? "/api/agent/turn/stream" : "/api/agent/turn";
-  const response = await fetchWithTimeout(
-    joinUrl(settings.apiBaseUrl, endpoint),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  await logFrontendDebug(settings.apiBaseUrl, traceId, "agent_turn.request_prepared", {
+    endpoint,
+    streaming: settings.streaming,
+    payload,
+  });
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      joinUrl(settings.apiBaseUrl, endpoint),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-DocPilot-Trace-Id": traceId,
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    },
-    settings.requestTimeoutMs,
-    signal,
-  );
+      settings.requestTimeoutMs,
+      signal,
+    );
+  } catch (error) {
+    await logFrontendDebug(settings.apiBaseUrl, traceId, "agent_turn.request_failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+
+  await logFrontendDebug(settings.apiBaseUrl, traceId, "agent_turn.response_received", {
+    statusCode: response.status,
+    contentType: response.headers.get("content-type") ?? "",
+    responseTraceId: response.headers.get("X-DocPilot-Trace-Id") ?? null,
+  });
 
   const contentType = response.headers.get("content-type") ?? "";
   if (settings.streaming && contentType.includes("text/event-stream")) {
-    return readAgentEventStream(response, { onTextChunk, onToolActivity, onNotice });
+    return readAgentEventStream(response, {
+      onTextChunk,
+      onToolActivity,
+      onNotice,
+      traceId,
+      apiBaseUrl: settings.apiBaseUrl,
+    });
   }
 
-  return readJsonResponse(response, "The backend returned an error.", parseAgentTurnResponse);
+  const parsed = await readJsonResponse(response, "The backend returned an error.", parseAgentTurnResponse);
+  await logFrontendDebug(settings.apiBaseUrl, traceId, "agent_turn.response_resolved", parsed);
+  return parsed;
 }
 
 export async function importDocumentFromBackend(args: {

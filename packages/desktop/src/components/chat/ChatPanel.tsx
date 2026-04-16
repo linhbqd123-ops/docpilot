@@ -186,6 +186,7 @@ export function ChatPanel() {
     selectedChat,
     currentMessages,
     updateComposer,
+    updateSettings,
     sendMessage,
     retryMessage,
     cancelRequest,
@@ -313,6 +314,31 @@ export function ChatPanel() {
                 </button>
               </>
             ) : null}
+            {/* Mode switch (Agent / Ask) - styled like a compact segmented control */}
+            <div className="inline-flex items-center gap-1 rounded-full border border-docpilot-border bg-docpilot-panelAlt p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => updateSettings({ mode: "agent" })}
+                className={cn(
+                  "px-2 py-1 rounded-full",
+                  state.settings.mode === "agent" ? "bg-docpilot-accent/20 text-docpilot-textStrong" : "text-docpilot-muted",
+                )}
+                title="Agent mode — document-aware assistant"
+              >
+                DocPilot
+              </button>
+              <button
+                type="button"
+                onClick={() => updateSettings({ mode: "ask" })}
+                className={cn(
+                  "px-2 py-1 rounded-full",
+                  state.settings.mode === "ask" ? "bg-docpilot-accent/20 text-docpilot-textStrong" : "text-docpilot-muted",
+                )}
+                title="Ask mode — quick Q&A"
+              >
+                Ask
+              </button>
+            </div>
             <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
               <span
                 className={cn(
