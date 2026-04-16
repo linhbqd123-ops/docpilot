@@ -29,6 +29,8 @@ pnpm-debug.log*
 logs/
 **/logs/
 *.log
+packages/*/debug/*.jsonl
+packages/*/debug/*.log
 coverage/
 **/coverage/
 .nyc_output/
@@ -91,3 +93,6 @@ doc-processor/data/uploads/
 doc-processor/logs/
 
 .venv/
+# Core engine runtime data
+packages/core-engine/data/*.db
+packages/core-engine/data/chats.json
