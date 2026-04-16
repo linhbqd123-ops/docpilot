@@ -94,5 +94,4 @@ doc-processor/logs/
 
 .venv/
 # Core engine runtime data
-packages/core-engine/data/*.db
-packages/core-engine/data/chats.json
+packages/core-engine/data/docpilot.db*
