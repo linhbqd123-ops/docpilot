@@ -122,6 +122,13 @@ event: notice
 data: {"message": "Error: ..."}
 ```
 
+Notes:
+
+- `tool_started` / `tool_finished` can represent both document-engine steps and model phases. The backend now emits `llm_inference` with phases such as `compose_answer` and `plan_revision` so the UI can render Copilot-style inference progress.
+- Ask turns stream provider output token by token through `assistant_delta` instead of waiting for a full non-streaming response.
+- If `answer_about_document` returns no useful snippets, the backend falls back to the current HTML projection text and emits `get_html_projection` activity before composing the answer.
+- Edit turns first run a deterministic target-resolution pass. When the raw prompt search misses, the orchestrator extracts source/section hints such as quoted text or `replace X in Y with Z`, calls `locate_relevant_context` for those hints, and loads nearby block windows before asking the model to plan patch operations.
+
 ## Environment variables
 
 See `.env.example` for all options. Key ones:

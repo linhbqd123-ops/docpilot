@@ -122,6 +122,12 @@ SSE events:
 - `notice`
 - `done`
 
+Notes:
+
+- `tool_started` / `tool_finished` may include regular doc-mcp tool names such as `answer_about_document`, `inspect_document`, `locate_relevant_context`, `propose_document_edit`, plus `llm_inference` phases like `compose_answer` and `plan_revision`.
+- When retrieval does not yield enough snippets for an ask turn, the backend may emit `get_html_projection` activity and use the current projected document text as a fallback context source.
+- Frontends should surface tool activity progressively during the stream so users can see inference steps while the answer is being generated.
+
 ## Session and revision APIs
 
 ### `GET /api/agent/sessions/{sessionId}`

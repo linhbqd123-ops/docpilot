@@ -2,7 +2,9 @@ import type {
   AgentNotice,
   AgentTurnResponse,
   AppSettings,
+  Chat,
   ChatMessage,
+  DocumentRecord,
   ImportedDocumentPayload,
   RevisionProposal,
   RevisionReview,
@@ -61,6 +63,29 @@ function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+function parseDocumentKind(value: unknown): DocumentRecord["kind"] {
+  switch (value) {
+    case "html":
+    case "markdown":
+    case "text":
+    case "docx":
+    case "pdf":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+
+function parseDocumentStatus(value: unknown): DocumentRecord["status"] {
+  switch (value) {
+    case "needs_backend":
+    case "error":
+      return value;
+    default:
+      return "ready";
+  }
+}
+
 function parseValidation(value: unknown): RevisionValidation | undefined {
   const record = asRecord(value);
   if (Object.keys(record).length === 0) {
@@ -99,8 +124,8 @@ function parseReview(value: unknown): RevisionReview | null {
 
   const operations = Array.isArray(record.operations)
     ? record.operations
-        .map(parseReviewOperation)
-        .filter((operation): operation is ReviewOperation => operation !== null)
+      .map(parseReviewOperation)
+      .filter((operation): operation is ReviewOperation => operation !== null)
     : [];
 
   return {
@@ -182,6 +207,77 @@ function parseMutationResult(value: unknown) {
   };
 }
 
+function parseChatRole(value: unknown): ChatMessage["role"] {
+  switch (value) {
+    case "assistant":
+    case "system":
+    case "error":
+      return value;
+    default:
+      return "user";
+  }
+}
+
+function parseChatStatus(value: unknown): ChatMessage["status"] {
+  switch (value) {
+    case "streaming":
+    case "error":
+      return value;
+    default:
+      return "sent";
+  }
+}
+
+function parseChatMessage(value: unknown): ChatMessage | null {
+  const record = asRecord(value);
+  const id = asNonEmptyString(record.id);
+
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    role: parseChatRole(record.role),
+    content: asNonEmptyString(record.content) ?? "",
+    createdAt: asNumber(record.createdAt ?? record.created_at, Date.now()),
+    status: parseChatStatus(record.status),
+    toolActivity: Array.isArray(record.toolActivity ?? record.tool_activity)
+      ? ((record.toolActivity ?? record.tool_activity) as unknown[])
+        .map(parseToolActivity)
+        .filter((entry: ToolActivity | null): entry is ToolActivity => entry !== null)
+      : [],
+    notices: Array.isArray(record.notices) ? record.notices.map(parseNotice) : [],
+  };
+}
+
+function parseChat(value: unknown): Chat | null {
+  const record = asRecord(value);
+  const id = asNonEmptyString(record.id);
+  const documentId = asNonEmptyString(record.documentId ?? record.document_id);
+
+  if (!id || !documentId) {
+    return null;
+  }
+
+  const messages = Array.isArray(record.messages)
+    ? record.messages
+      .map(parseChatMessage)
+      .filter((message): message is ChatMessage => message !== null)
+    : [];
+
+  const createdAt = asNumber(record.createdAt ?? record.created_at, Date.now());
+
+  return {
+    id,
+    name: asNonEmptyString(record.name) ?? "Untitled chat",
+    documentId,
+    messages,
+    createdAt,
+    updatedAt: asNumber(record.updatedAt ?? record.updated_at, createdAt),
+  };
+}
+
 function parseToolActivity(value: unknown): ToolActivity | null {
   const record = asRecord(value);
   const event = asNonEmptyString(record.event);
@@ -216,8 +312,8 @@ function parseAgentTurnResponse(value: unknown): AgentTurnResponse {
   const rawToolActivity = record.toolActivity ?? record.tool_activity;
   const toolActivity = Array.isArray(rawToolActivity)
     ? rawToolActivity
-        .map(parseToolActivity)
-        .filter((entry: ToolActivity | null): entry is ToolActivity => entry !== null)
+      .map(parseToolActivity)
+      .filter((entry: ToolActivity | null): entry is ToolActivity => entry !== null)
     : [];
   const notices = Array.isArray(record.notices) ? record.notices.map(parseNotice) : [];
 
@@ -252,8 +348,8 @@ function parseSessionRefreshPayload(value: unknown): SessionRefreshPayload {
   const session = parseSessionSummary(record.session);
   const revisions = Array.isArray(record.revisions)
     ? record.revisions
-        .map(parseSessionRevisionSummary)
-        .filter((revision): revision is SessionRevisionSummary => revision !== null)
+      .map(parseSessionRevisionSummary)
+      .filter((revision): revision is SessionRevisionSummary => revision !== null)
     : [];
 
   return {
@@ -266,6 +362,62 @@ function parseSessionRefreshPayload(value: unknown): SessionRefreshPayload {
   };
 }
 
+function parseDocumentRecord(value: unknown): DocumentRecord | null {
+  const record = asRecord(value);
+  const id = asNonEmptyString(record.id);
+  if (!id) {
+    return null;
+  }
+
+  const outline = Array.isArray(record.outline)
+    ? record.outline
+      .map((item) => {
+        const outlineRecord = asRecord(item);
+        const outlineId = asNonEmptyString(outlineRecord.id);
+        if (!outlineId) {
+          return null;
+        }
+
+        return {
+          id: outlineId,
+          title: asNonEmptyString(outlineRecord.title) ?? "Untitled",
+          level: asNumber(outlineRecord.level, 1),
+        };
+      })
+      .filter((item): item is DocumentRecord["outline"][number] => item !== null)
+    : [];
+
+  const revisions = Array.isArray(record.revisions)
+    ? record.revisions
+      .map(parseSessionRevisionSummary)
+      .filter((revision): revision is SessionRevisionSummary => revision !== null)
+    : [];
+
+  return {
+    id,
+    name: asNonEmptyString(record.name) ?? "Untitled document",
+    kind: parseDocumentKind(record.kind),
+    mimeType: asNonEmptyString(record.mimeType ?? record.mime_type) ?? "",
+    size: asNumber(record.size, 0),
+    status: parseDocumentStatus(record.status),
+    html: asNonEmptyString(record.html) ?? "",
+    outline,
+    wordCount: asNumber(record.wordCount ?? record.word_count, 0),
+    createdAt: asNumber(record.createdAt ?? record.created_at, Date.now()),
+    updatedAt: asNumber(record.updatedAt ?? record.updated_at, Date.now()),
+    backendDocId: asNonEmptyString(record.backendDocId ?? record.backend_doc_id),
+    documentSessionId: asNonEmptyString(record.documentSessionId ?? record.document_session_id),
+    baseRevisionId: asNonEmptyString(record.baseRevisionId ?? record.base_revision_id) ?? null,
+    currentRevisionId: asNonEmptyString(record.currentRevisionId ?? record.current_revision_id) ?? null,
+    pendingRevisionId: asNonEmptyString(record.pendingRevisionId ?? record.pending_revision_id),
+    revisionStatus: asNonEmptyString(record.revisionStatus ?? record.revision_status) ?? null,
+    sessionState: asNonEmptyString(record.sessionState ?? record.session_state) ?? null,
+    reviewPayload: parseReview(record.reviewPayload ?? record.review_payload) ?? null,
+    revisions,
+    error: asNonEmptyString(record.error),
+  };
+}
+
 function tryParseJson(payload: string) {
   try {
     return JSON.parse(payload) as unknown;
@@ -274,10 +426,17 @@ function tryParseJson(payload: string) {
   }
 }
 
+interface AgentTurnStreamCallbacks {
+  onTextChunk?: (chunk: string) => void;
+  onToolActivity?: (toolActivity: ToolActivity[]) => void;
+  onNotice?: (notices: AgentNotice[]) => void;
+}
+
 async function readAgentEventStream(
   response: Response,
-  onTextChunk?: (chunk: string) => void,
+  callbacks: AgentTurnStreamCallbacks = {},
 ): Promise<AgentTurnResponse> {
+  const { onTextChunk, onToolActivity, onNotice } = callbacks;
   const reader = response.body?.getReader();
 
   if (!reader) {
@@ -291,6 +450,57 @@ async function readAgentEventStream(
   const toolActivity: ToolActivity[] = [];
   let finalPayload: AgentTurnResponse | null = null;
 
+  const processEventBlock = (eventBlock: string) => {
+    if (!eventBlock.trim()) {
+      return;
+    }
+
+    let eventName = "message";
+    const dataLines: string[] = [];
+
+    for (const line of eventBlock.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    const parsed = tryParseJson(dataLines.join("\n"));
+
+    if (eventName === "assistant_delta") {
+      const chunk = typeof parsed === "string" ? parsed : asNonEmptyString(asRecord(parsed).message) ?? "";
+      if (chunk) {
+        message += chunk;
+        onTextChunk?.(chunk);
+      }
+      return;
+    }
+
+    if (eventName === "tool_started" || eventName === "tool_finished") {
+      const activity = parseToolActivity({ event: eventName, ...asRecord(parsed) });
+      if (activity) {
+        toolActivity.push(activity);
+        onToolActivity?.([...toolActivity]);
+      }
+      return;
+    }
+
+    if (eventName === "notice") {
+      notices.push(parseNotice(parsed));
+      onNotice?.([...notices]);
+      return;
+    }
+
+    if (eventName === "done") {
+      finalPayload = parseAgentTurnResponse(parsed);
+    }
+  };
+
   while (true) {
     const { value, done } = await reader.read();
 
@@ -303,56 +513,16 @@ async function readAgentEventStream(
     buffer = events.pop() ?? "";
 
     for (const eventBlock of events) {
-      if (!eventBlock.trim()) {
-        continue;
-      }
-
-      let eventName = "message";
-      const dataLines: string[] = [];
-
-      for (const line of eventBlock.split("\n")) {
-        if (line.startsWith("event:")) {
-          eventName = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          dataLines.push(line.slice(5).trim());
-        }
-      }
-
-      if (dataLines.length === 0) {
-        continue;
-      }
-
-      const parsed = tryParseJson(dataLines.join("\n"));
-
-      if (eventName === "assistant_delta") {
-        const chunk = typeof parsed === "string" ? parsed : asNonEmptyString(asRecord(parsed).message) ?? "";
-        if (chunk) {
-          message += chunk;
-          onTextChunk?.(chunk);
-        }
-        continue;
-      }
-
-      if (eventName === "tool_started" || eventName === "tool_finished") {
-        const activity = parseToolActivity({ event: eventName, ...asRecord(parsed) });
-        if (activity) {
-          toolActivity.push(activity);
-        }
-        continue;
-      }
-
-      if (eventName === "notice") {
-        notices.push(parseNotice(parsed));
-        continue;
-      }
-
-      if (eventName === "done") {
-        finalPayload = parseAgentTurnResponse(parsed);
-      }
+      processEventBlock(eventBlock);
     }
   }
 
-  const resolved = finalPayload ?? {
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    buffer.split("\n\n").forEach(processEventBlock);
+  }
+
+  const resolved: AgentTurnResponse = finalPayload ?? {
     message,
     mode: "agent",
     resultType: "answer",
@@ -412,6 +582,8 @@ export async function sendAgentTurnToBackend(args: {
   history: ChatMessage[];
   prompt: string;
   onTextChunk?: (chunk: string) => void;
+  onToolActivity?: (toolActivity: ToolActivity[]) => void;
+  onNotice?: (notices: AgentNotice[]) => void;
   signal?: AbortSignal;
 }): Promise<AgentTurnResponse> {
   const {
@@ -424,6 +596,8 @@ export async function sendAgentTurnToBackend(args: {
     history,
     prompt,
     onTextChunk,
+    onToolActivity,
+    onNotice,
     signal,
   } = args;
 
@@ -462,7 +636,7 @@ export async function sendAgentTurnToBackend(args: {
 
   const contentType = response.headers.get("content-type") ?? "";
   if (settings.streaming && contentType.includes("text/event-stream")) {
-    return readAgentEventStream(response, onTextChunk);
+    return readAgentEventStream(response, { onTextChunk, onToolActivity, onNotice });
   }
 
   return readJsonResponse(response, "The backend returned an error.", parseAgentTurnResponse);
@@ -668,7 +842,57 @@ export async function loadChatsFromBackend(baseUrl: string) {
   }
 
   const payload = (await response.json()) as { chats: unknown[] };
-  return payload.chats;
+  return (payload.chats ?? [])
+    .map(parseChat)
+    .filter((chat): chat is Chat => chat !== null);
+}
+
+export async function loadDocumentsFromBackend(baseUrl: string): Promise<DocumentRecord[]> {
+  const response = await fetch(joinUrl(baseUrl, "/api/documents"), {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to load documents", response.status);
+  }
+
+  const payload = (await response.json()) as { documents: unknown[] };
+  return (payload.documents ?? [])
+    .map(parseDocumentRecord)
+    .filter((document): document is DocumentRecord => document !== null);
+}
+
+export async function saveDocumentToBackend(baseUrl: string, document: DocumentRecord): Promise<DocumentRecord> {
+  const response = await fetch(joinUrl(baseUrl, "/api/documents"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(document),
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to save document", response.status);
+  }
+
+  const payload = (await response.json()) as { document: unknown };
+  const saved = parseDocumentRecord(payload.document);
+  if (!saved) {
+    throw new ApiError("Backend returned an invalid document payload.");
+  }
+  return saved;
+}
+
+export async function deleteDocumentFromBackend(baseUrl: string, documentId: string) {
+  const response = await fetch(joinUrl(baseUrl, `/api/documents/${documentId}`), {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new ApiError("Failed to delete document", response.status);
+  }
+
+  return { ok: true };
 }
 
 export async function saveChat(
@@ -686,7 +910,13 @@ export async function saveChat(
   }
 
   const payload = (await response.json()) as { chat: unknown };
-  return payload.chat;
+  const savedChat = parseChat(payload.chat);
+
+  if (!savedChat) {
+    throw new ApiError("Backend returned an invalid chat payload.");
+  }
+
+  return savedChat;
 }
 
 export async function updateChat(
@@ -705,7 +935,13 @@ export async function updateChat(
   }
 
   const payload = (await response.json()) as { chat: unknown };
-  return payload.chat;
+  const savedChat = parseChat(payload.chat);
+
+  if (!savedChat) {
+    throw new ApiError("Backend returned an invalid chat payload.");
+  }
+
+  return savedChat;
 }
 
 export async function deleteChat(baseUrl: string, chatId: string) {

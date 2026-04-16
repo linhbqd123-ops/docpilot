@@ -20,8 +20,12 @@ import {
   updateDocumentHtml,
 } from "@/lib/document";
 
+function sortChatsByUpdatedAt(chats: Chat[]) {
+  return [...chats].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
-  apiBaseUrl: "http://localhost:8000", // Backend server - FIXED, not user-configurable
+  apiBaseUrl: import.meta.env.VITE_DOCPILOT_API_BASE_URL?.trim() || "http://localhost:8000",
   provider: (import.meta.env.VITE_DOCPILOT_PROVIDER as AppSettings["provider"] | undefined) ?? "ollama",
   modelOverride: "",
   requestTimeoutMs: 30_000,
@@ -49,7 +53,7 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
     settings: {
       ...DEFAULT_SETTINGS,
       ...persisted.settings,
-      // CRITICAL: apiBaseUrl must ALWAYS be the backend server, never user-configurable
+      // apiBaseUrl is bundled with the desktop build and must not be user-configurable.
       apiBaseUrl: DEFAULT_SETTINGS.apiBaseUrl,
       theme: persistedTheme && isThemeMode(persistedTheme) ? persistedTheme : DEFAULT_SETTINGS.theme,
     },
@@ -63,6 +67,7 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
 
 type Action =
   | { type: "setActiveSidebarView"; payload: SidebarView }
+  | { type: "hydrateDocuments"; payload: DocumentRecord[] }
   | { type: "upsertDocument"; payload: DocumentRecord }
   | { type: "removeDocument"; payload: string }
   | { type: "selectDocument"; payload: string | null }
@@ -80,36 +85,36 @@ type Action =
   | { type: "deleteChat"; payload: string }
   | { type: "renameChat"; payload: { chatId: string; name: string } }
   | {
-      type: "setDocumentProjection";
-      payload: {
-        documentId: string;
-        html: string;
-        session?: SessionSummary;
-        revisions?: SessionRevisionSummary[];
-        clearReview?: boolean;
-        revisionStatus?: string | null;
-      };
-    }
+    type: "setDocumentProjection";
+    payload: {
+      documentId: string;
+      html: string;
+      session?: SessionSummary;
+      revisions?: SessionRevisionSummary[];
+      clearReview?: boolean;
+      revisionStatus?: string | null;
+    };
+  }
   | {
-      type: "setDocumentSession";
-      payload: {
-        documentId: string;
-        session: SessionSummary;
-        revisions?: SessionRevisionSummary[];
-        clearReview?: boolean;
-        revisionStatus?: string | null;
-      };
-    }
+    type: "setDocumentSession";
+    payload: {
+      documentId: string;
+      session: SessionSummary;
+      revisions?: SessionRevisionSummary[];
+      clearReview?: boolean;
+      revisionStatus?: string | null;
+    };
+  }
   | {
-      type: "stageRevision";
-      payload: {
-        documentId: string;
-        revisionId: string;
-        reviewPayload: RevisionReview | null;
-        status?: string | null;
-        baseRevisionId?: string | null;
-      };
-    }
+    type: "stageRevision";
+    payload: {
+      documentId: string;
+      revisionId: string;
+      reviewPayload: RevisionReview | null;
+      status?: string | null;
+      baseRevisionId?: string | null;
+    };
+  }
   | { type: "clearRevision"; payload: { documentId: string; status?: string | null } }
   | { type: "updateDocumentHtml"; payload: { documentId: string; html: string } };
 
@@ -120,6 +125,26 @@ export function appReducer(state: AppState, action: Action): AppState {
         ...state,
         activeSidebarView: action.payload,
       };
+
+    case "hydrateDocuments": {
+      const documents = [...action.payload].sort((left, right) => right.updatedAt - left.updatedAt);
+      const selectedDocumentId =
+        state.selectedDocumentId && documents.some((document) => document.id === state.selectedDocumentId)
+          ? state.selectedDocumentId
+          : documents[0]?.id ?? null;
+
+      return {
+        ...state,
+        documents,
+        selectedDocumentId,
+        selectedChatId:
+          selectedDocumentId && state.selectedChatId && state.chats.some(
+            (chat) => chat.id === state.selectedChatId && chat.documentId === selectedDocumentId,
+          )
+            ? state.selectedChatId
+            : null,
+      };
+    }
 
     case "upsertDocument": {
       const exists = state.documents.some((document) => document.id === action.payload.id);
@@ -159,12 +184,7 @@ export function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         selectedDocumentId: action.payload,
-        selectedChatId:
-          action.payload && state.selectedChatId && state.chats.some(
-            (chat) => chat.id === state.selectedChatId && chat.documentId === action.payload,
-          )
-            ? state.selectedChatId
-            : null,
+        selectedChatId: null,
       };
 
     case "setComposer":
@@ -206,14 +226,17 @@ export function appReducer(state: AppState, action: Action): AppState {
     case "addMessage": {
       const currentThread = state.messageThreads[action.payload.documentId] ?? [];
       const nextThread = [...currentThread, action.payload.message];
-
-      return {
-        ...state,
-        chats: state.chats.map((chat) =>
+      const chats = sortChatsByUpdatedAt(
+        state.chats.map((chat) =>
           chat.id === action.payload.documentId
             ? { ...chat, messages: nextThread, updatedAt: Date.now() }
             : chat,
         ),
+      );
+
+      return {
+        ...state,
+        chats,
         messageThreads: {
           ...state.messageThreads,
           [action.payload.documentId]: nextThread,
@@ -226,14 +249,17 @@ export function appReducer(state: AppState, action: Action): AppState {
       const nextThread = currentThread.map((message) =>
         message.id === action.payload.messageId ? { ...message, ...action.payload.patch } : message,
       );
-
-      return {
-        ...state,
-        chats: state.chats.map((chat) =>
+      const chats = sortChatsByUpdatedAt(
+        state.chats.map((chat) =>
           chat.id === action.payload.documentId
             ? { ...chat, messages: nextThread, updatedAt: Date.now() }
             : chat,
         ),
+      );
+
+      return {
+        ...state,
+        chats,
         messageThreads: {
           ...state.messageThreads,
           [action.payload.documentId]: nextThread,
@@ -244,12 +270,15 @@ export function appReducer(state: AppState, action: Action): AppState {
     case "clearMessages": {
       const messageThreads = { ...state.messageThreads };
       messageThreads[action.payload] = [];
+      const chats = sortChatsByUpdatedAt(
+        state.chats.map((chat) =>
+          chat.id === action.payload ? { ...chat, messages: [], updatedAt: Date.now() } : chat,
+        ),
+      );
 
       return {
         ...state,
-        chats: state.chats.map((chat) =>
-          chat.id === action.payload ? { ...chat, messages: [], updatedAt: Date.now() } : chat,
-        ),
+        chats,
         messageThreads,
       };
     }
@@ -277,9 +306,11 @@ export function appReducer(state: AppState, action: Action): AppState {
 
     case "createChat": {
       const exists = state.chats.some((chat) => chat.id === action.payload.chat.id);
-      const chats = exists
-        ? state.chats.map((chat) => (chat.id === action.payload.chat.id ? action.payload.chat : chat))
-        : [action.payload.chat, ...state.chats];
+      const chats = sortChatsByUpdatedAt(
+        exists
+          ? state.chats.map((chat) => (chat.id === action.payload.chat.id ? action.payload.chat : chat))
+          : [action.payload.chat, ...state.chats],
+      );
       return {
         ...state,
         chats,
@@ -311,19 +342,22 @@ export function appReducer(state: AppState, action: Action): AppState {
         ...state,
         chats,
         messageThreads,
-        selectedChatId:
-          state.selectedChatId === action.payload ? chats[0]?.id ?? null : state.selectedChatId,
+        selectedChatId: state.selectedChatId === action.payload ? null : state.selectedChatId,
       };
     }
 
     case "renameChat": {
-      return {
-        ...state,
-        chats: state.chats.map((chat) =>
+      const chats = sortChatsByUpdatedAt(
+        state.chats.map((chat) =>
           chat.id === action.payload.chatId
             ? { ...chat, name: action.payload.name, updatedAt: Date.now() }
             : chat,
         ),
+      );
+
+      return {
+        ...state,
+        chats,
       };
     }
 
@@ -397,11 +431,11 @@ export function appReducer(state: AppState, action: Action): AppState {
         documents: state.documents.map((document) =>
           document.id === action.payload.documentId
             ? stageDocumentReview(document, {
-                revisionId: action.payload.revisionId,
-                reviewPayload: action.payload.reviewPayload,
-                status: action.payload.status,
-                baseRevisionId: action.payload.baseRevisionId,
-              })
+              revisionId: action.payload.revisionId,
+              reviewPayload: action.payload.reviewPayload,
+              status: action.payload.status,
+              baseRevisionId: action.payload.baseRevisionId,
+            })
             : document,
         ),
       };

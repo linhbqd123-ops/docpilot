@@ -117,6 +117,8 @@ export interface ChatMessage {
   content: string;
   createdAt: number;
   status?: "streaming" | "sent" | "error";
+  toolActivity?: ToolActivity[];
+  notices?: AgentNotice[];
 }
 
 export interface Chat {

@@ -21,24 +21,28 @@ import { getThemeDefinition } from "@/app/themes";
 import {
   applyRevisionInBackend,
   checkBackendHealth,
+  deleteDocumentFromBackend,
   deleteChat as deleteChatApi,
   exportDocumentToDocx,
   getErrorMessage,
   importDocumentFromBackend,
   loadChatsFromBackend,
+  loadDocumentsFromBackend,
   refreshSessionFromBackend,
   rejectRevisionInBackend,
   rollbackRevisionInBackend,
+  saveDocumentToBackend,
   saveChat,
   sendAgentTurnToBackend,
   updateChat,
 } from "@/lib/api";
 import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
-import { loadPersistedState, savePersistedState } from "@/lib/storage";
+import { loadLegacyDocumentsSnapshot, loadPersistedState, savePersistedState } from "@/lib/storage";
 
 interface AppContextValue {
   state: AppState;
   selectedDocument: DocumentRecord | null;
+  selectedChat: Chat | null;
   currentMessages: ChatMessage[];
   importFiles: (files: FileList | File[]) => Promise<void>;
   removeDocument: (documentId: string) => void;
@@ -48,6 +52,7 @@ interface AppContextValue {
   updateSettings: (patch: Partial<AppSettings>) => void;
   testConnection: () => Promise<void>;
   sendMessage: () => Promise<void>;
+  retryMessage: (assistantMessageId: string) => Promise<void>;
   cancelRequest: () => void;
   applyStagedRevision: () => Promise<void>;
   rejectStagedRevision: () => Promise<void>;
@@ -86,20 +91,61 @@ function formatNotices(notices?: AgentNotice[]) {
 export function AppProvider({ children }: PropsWithChildren) {
   const [state, dispatch] = useReducer(appReducer, loadPersistedState(), createInitialState);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const documentsRef = useRef<DocumentRecord[]>(state.documents);
+  const previousDocumentsRef = useRef<DocumentRecord[]>([]);
+  const documentsSyncReadyRef = useRef(false);
+  const legacyDocumentsRef = useRef<DocumentRecord[]>(loadLegacyDocumentsSnapshot());
 
   const selectedDocument = state.documents.find((document) => document.id === state.selectedDocumentId) ?? null;
   const selectedChat = selectedDocument && state.selectedChatId
     ? state.chats.find((chat) => chat.id === state.selectedChatId && chat.documentId === selectedDocument.id) ?? null
     : null;
-  const currentMessages = selectedChat
-    ? state.messageThreads[selectedChat.id] ?? []
-    : selectedDocument
-      ? state.messageThreads[selectedDocument.id] ?? []
-      : [];
+  const currentMessages = selectedChat ? state.messageThreads[selectedChat.id] ?? [] : [];
+
+  function buildChatName(seed?: string) {
+    const normalizedSeed = seed?.trim().replace(/\s+/g, " ");
+
+    if (normalizedSeed) {
+      return normalizedSeed.length > 48 ? `${normalizedSeed.slice(0, 45)}...` : normalizedSeed;
+    }
+
+    return `Chat ${new Date().toLocaleTimeString()}`;
+  }
+
+  function createChatRecord(document: DocumentRecord, seed?: string): Chat {
+    const timestamp = Date.now();
+
+    return {
+      id: crypto.randomUUID(),
+      name: buildChatName(seed),
+      documentId: document.id,
+      messages: [],
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+  }
+
+  async function syncChatSnapshot(chat: Chat, errorMessage: string) {
+    if (!state.settings.apiBaseUrl.trim()) {
+      return;
+    }
+
+    try {
+      const savedChat = await saveChat(state.settings.apiBaseUrl, chat);
+      dispatch({ type: "hydrateChats", payload: [savedChat] });
+    } catch (error) {
+      console.error(errorMessage, error);
+      dispatch({ type: "setBanner", payload: "Chat saved locally, but failed to sync the backend copy." });
+    }
+  }
 
   useEffect(() => {
     savePersistedState(state);
   }, [state]);
+
+  useEffect(() => {
+    documentsRef.current = state.documents;
+  }, [state.documents]);
 
   useEffect(() => {
     const theme = getThemeDefinition(state.settings.theme);
@@ -107,6 +153,92 @@ export function AppProvider({ children }: PropsWithChildren) {
     document.documentElement.dataset.theme = theme.id;
     document.documentElement.style.colorScheme = theme.appearance;
   }, [state.settings.theme]);
+
+  useEffect(() => {
+    if (!state.settings.apiBaseUrl.trim()) {
+      previousDocumentsRef.current = documentsRef.current;
+      documentsSyncReadyRef.current = true;
+      return;
+    }
+
+    let cancelled = false;
+    documentsSyncReadyRef.current = false;
+
+    loadDocumentsFromBackend(state.settings.apiBaseUrl)
+      .then(async (documents) => {
+        let hydratedDocuments = documents;
+
+        if (hydratedDocuments.length === 0 && legacyDocumentsRef.current.length > 0) {
+          hydratedDocuments = await Promise.all(
+            legacyDocumentsRef.current.map((document) => saveDocumentToBackend(state.settings.apiBaseUrl, document)),
+          );
+          legacyDocumentsRef.current = [];
+          if (!cancelled) {
+            dispatch({
+              type: "setBanner",
+              payload: `Migrated ${hydratedDocuments.length} local document${hydratedDocuments.length === 1 ? "" : "s"} into backend storage.`,
+            });
+          }
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        dispatch({ type: "hydrateDocuments", payload: hydratedDocuments });
+        previousDocumentsRef.current = hydratedDocuments;
+        documentsSyncReadyRef.current = true;
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        console.error("Failed to load documents from backend:", error);
+        previousDocumentsRef.current = documentsRef.current;
+        documentsSyncReadyRef.current = true;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.settings.apiBaseUrl]);
+
+  useEffect(() => {
+    if (!documentsSyncReadyRef.current || !state.settings.apiBaseUrl.trim()) {
+      return;
+    }
+
+    const previousDocuments = previousDocumentsRef.current;
+    const previousSerialized = new Map(
+      previousDocuments.map((document) => [document.id, JSON.stringify(document)]),
+    );
+    const currentSerialized = new Map(
+      state.documents.map((document) => [document.id, JSON.stringify(document)]),
+    );
+    const documentsToSave = state.documents.filter(
+      (document) => previousSerialized.get(document.id) !== currentSerialized.get(document.id),
+    );
+    const documentsToDelete = previousDocuments.filter(
+      (document) => !currentSerialized.has(document.id),
+    );
+
+    if (documentsToSave.length === 0 && documentsToDelete.length === 0) {
+      return;
+    }
+
+    previousDocumentsRef.current = state.documents;
+
+    void Promise.allSettled([
+      ...documentsToSave.map((document) => saveDocumentToBackend(state.settings.apiBaseUrl, document)),
+      ...documentsToDelete.map((document) => deleteDocumentFromBackend(state.settings.apiBaseUrl, document.id)),
+    ]).then((results) => {
+      const failed = results.some((result) => result.status === "rejected");
+      if (failed) {
+        console.error("Document library sync failed.", results);
+      }
+    });
+  }, [state.documents, state.settings.apiBaseUrl]);
 
   useEffect(() => {
     if (state.settings.connectOnStartup && state.settings.apiBaseUrl.trim()) {
@@ -164,8 +296,8 @@ export function AppProvider({ children }: PropsWithChildren) {
 
     loadChatsFromBackend(state.settings.apiBaseUrl)
       .then((chats) => {
-        if (Array.isArray(chats) && chats.length > 0) {
-          dispatch({ type: "hydrateChats", payload: chats as Chat[] });
+        if (chats.length > 0) {
+          dispatch({ type: "hydrateChats", payload: chats });
         }
       })
       .catch((error) => {
@@ -368,7 +500,13 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    const messageThreadId = selectedChat?.id ?? selectedDocument.id;
+    const activeChat = selectedChat ?? createChatRecord(selectedDocument, prompt);
+
+    if (!selectedChat) {
+      dispatch({ type: "createChat", payload: { chat: activeChat } });
+    }
+
+    const messageThreadId = activeChat.id;
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -382,6 +520,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       content: "",
       createdAt: Date.now(),
       status: "streaming",
+      toolActivity: [],
+      notices: [],
     };
 
     dispatch({ type: "addMessage", payload: { documentId: messageThreadId, message: userMessage } });
@@ -393,6 +533,9 @@ export function AppProvider({ children }: PropsWithChildren) {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     let accumulated = "";
+    let latestToolActivity = assistantMessage.toolActivity ?? [];
+    let latestNotices = assistantMessage.notices ?? [];
+    const historyWithUserMessage = [...currentMessages, userMessage];
 
     try {
       const reply = await sendAgentTurnToBackend({
@@ -402,7 +545,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         currentRevisionId: selectedDocument.currentRevisionId ?? selectedDocument.baseRevisionId,
         documentId: selectedDocument.id,
         visibleBlockIds: selectedDocument.outline.map((item) => item.id),
-        history: [...currentMessages, userMessage],
+        history: historyWithUserMessage,
         prompt,
         signal: controller.signal,
         onTextChunk: (chunk) => {
@@ -416,34 +559,73 @@ export function AppProvider({ children }: PropsWithChildren) {
             },
           });
         },
+        onToolActivity: (toolActivity) => {
+          latestToolActivity = toolActivity;
+          dispatch({
+            type: "updateMessage",
+            payload: {
+              documentId: messageThreadId,
+              messageId: assistantMessage.id,
+              patch: { toolActivity, status: "streaming" },
+            },
+          });
+        },
+        onNotice: (notices) => {
+          latestNotices = notices;
+          dispatch({
+            type: "updateMessage",
+            payload: {
+              documentId: messageThreadId,
+              messageId: assistantMessage.id,
+              patch: { notices, status: "streaming" },
+            },
+          });
+        },
       });
+
+      latestToolActivity = reply.toolActivity;
+      latestNotices = reply.notices;
 
       if (reply.status === "failed") {
         throw new Error(formatNotices(reply.notices) || reply.message || "Agent turn failed.");
       }
 
       const assistantContent = reply.message || accumulated;
+      const completedAssistantMessage: ChatMessage = {
+        ...assistantMessage,
+        content: assistantContent,
+        status: "sent",
+        toolActivity: reply.toolActivity,
+        notices: reply.notices,
+      };
+
       dispatch({
         type: "updateMessage",
         payload: {
           documentId: messageThreadId,
           messageId: assistantMessage.id,
-          patch: { content: assistantContent, status: "sent" },
+          patch: {
+            content: assistantContent,
+            status: "sent",
+            toolActivity: reply.toolActivity,
+            notices: reply.notices,
+          },
         },
       });
 
-      if (selectedChat && state.settings.apiBaseUrl.trim()) {
-        const updatedMessageThread: ChatMessage[] = [
-          ...currentMessages,
-          userMessage,
-          { ...assistantMessage, content: assistantContent, status: "sent" },
-        ];
-        updateChat(state.settings.apiBaseUrl, selectedChat.id, {
+      const updatedMessageThread: ChatMessage[] = [
+        ...historyWithUserMessage,
+        completedAssistantMessage,
+      ];
+
+      void syncChatSnapshot(
+        {
+          ...activeChat,
           messages: updatedMessageThread,
-        }).catch((error) => {
-          console.error("Failed to sync messages to backend:", error);
-        });
-      }
+          updatedAt: Date.now(),
+        },
+        "Failed to sync chat to backend:",
+      );
 
       if (reply.resultType === "revision_staged" && reply.revisionId) {
         dispatch({
@@ -466,15 +648,247 @@ export function AppProvider({ children }: PropsWithChildren) {
         dispatch({ type: "setBanner", payload: "Revision staged for review." });
       }
     } catch (error) {
+      const failedAssistantMessage: ChatMessage = {
+        ...assistantMessage,
+        role: "error",
+        content: getErrorMessage(error),
+        status: "error",
+        toolActivity: latestToolActivity,
+        notices: latestNotices,
+      };
+
+      const failedMessageThread: ChatMessage[] = [
+        ...historyWithUserMessage,
+        failedAssistantMessage,
+      ];
+
       dispatch({
         type: "updateMessage",
         payload: {
           documentId: messageThreadId,
           messageId: assistantMessage.id,
-          patch: { role: "error", content: getErrorMessage(error), status: "error" },
+          patch: {
+            role: "error",
+            content: getErrorMessage(error),
+            status: "error",
+            toolActivity: latestToolActivity,
+            notices: latestNotices,
+          },
         },
       });
       dispatch({ type: "setBanner", payload: getErrorMessage(error) });
+
+      void syncChatSnapshot(
+        {
+          ...activeChat,
+          messages: failedMessageThread,
+          updatedAt: Date.now(),
+        },
+        "Failed to sync failed chat to backend:",
+      );
+    } finally {
+      abortControllerRef.current = null;
+      dispatch({ type: "setIsSending", payload: false });
+    }
+  }
+
+  async function retryMessage(assistantMessageId: string) {
+    if (!selectedDocument || !selectedChat) {
+      return;
+    }
+
+    const messageThreadId = selectedChat.id;
+    const thread = state.messageThreads[selectedChat.id] ?? [];
+
+    const assistantIndex = thread.findIndex((m) => m.id === assistantMessageId && (m.role === "assistant" || m.role === "error"));
+    if (assistantIndex === -1) {
+      return;
+    }
+
+    let userIndex = assistantIndex - 1;
+    while (userIndex >= 0 && thread[userIndex].role !== "user") {
+      userIndex -= 1;
+    }
+
+    if (userIndex < 0) {
+      dispatch({ type: "setBanner", payload: "Unable to retry: original user message not found." });
+      return;
+    }
+
+    const userMessage = thread[userIndex];
+
+    const activeChat = selectedChat ?? createChatRecord(selectedDocument, userMessage.content);
+
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      status: "streaming",
+      toolActivity: [],
+      notices: [],
+    };
+
+    dispatch({ type: "addMessage", payload: { documentId: messageThreadId, message: assistantMessage } });
+    dispatch({ type: "setComposer", payload: "" });
+    dispatch({ type: "setIsSending", payload: true });
+    dispatch({ type: "setBanner", payload: null });
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    let accumulated = "";
+    let latestToolActivity = assistantMessage.toolActivity ?? [];
+    let latestNotices = assistantMessage.notices ?? [];
+    const historyUpToUser = thread.slice(0, userIndex + 1);
+    const sessionId = selectedDocument.documentSessionId;
+    if (!sessionId) {
+      dispatch({ type: "setBanner", payload: "Document session is not available for retry." });
+      dispatch({ type: "setIsSending", payload: false });
+      abortControllerRef.current = null;
+      return;
+    }
+
+    try {
+      const reply = await sendAgentTurnToBackend({
+        settings: state.settings,
+        chatId: messageThreadId,
+        documentSessionId: sessionId,
+        currentRevisionId: selectedDocument.currentRevisionId ?? selectedDocument.baseRevisionId,
+        documentId: selectedDocument.id,
+        visibleBlockIds: selectedDocument.outline.map((item) => item.id),
+        history: historyUpToUser,
+        prompt: userMessage.content,
+        signal: controller.signal,
+        onTextChunk: (chunk) => {
+          accumulated += chunk;
+          dispatch({
+            type: "updateMessage",
+            payload: {
+              documentId: messageThreadId,
+              messageId: assistantMessage.id,
+              patch: { content: accumulated, status: "streaming" },
+            },
+          });
+        },
+        onToolActivity: (toolActivity) => {
+          latestToolActivity = toolActivity;
+          dispatch({
+            type: "updateMessage",
+            payload: {
+              documentId: messageThreadId,
+              messageId: assistantMessage.id,
+              patch: { toolActivity, status: "streaming" },
+            },
+          });
+        },
+        onNotice: (notices) => {
+          latestNotices = notices;
+          dispatch({
+            type: "updateMessage",
+            payload: {
+              documentId: messageThreadId,
+              messageId: assistantMessage.id,
+              patch: { notices, status: "streaming" },
+            },
+          });
+        },
+      });
+
+      latestToolActivity = reply.toolActivity;
+      latestNotices = reply.notices;
+
+      if (reply.status === "failed") {
+        throw new Error(formatNotices(reply.notices) || reply.message || "Agent turn failed.");
+      }
+
+      const assistantContent = reply.message || accumulated;
+      const completedAssistantMessage: ChatMessage = {
+        ...assistantMessage,
+        content: assistantContent,
+        status: "sent",
+        toolActivity: reply.toolActivity,
+        notices: reply.notices,
+      };
+
+      dispatch({
+        type: "updateMessage",
+        payload: {
+          documentId: messageThreadId,
+          messageId: assistantMessage.id,
+          patch: {
+            content: assistantContent,
+            status: "sent",
+            toolActivity: reply.toolActivity,
+            notices: reply.notices,
+          },
+        },
+      });
+
+      const updatedMessageThread: ChatMessage[] = [...historyUpToUser, completedAssistantMessage];
+
+      void syncChatSnapshot(
+        {
+          ...activeChat,
+          messages: updatedMessageThread,
+          updatedAt: Date.now(),
+        },
+        "Failed to sync chat to backend:",
+      );
+
+      if (reply.resultType === "revision_staged" && reply.revisionId) {
+        dispatch({
+          type: "stageRevision",
+          payload: {
+            documentId: selectedDocument.id,
+            revisionId: reply.revisionId,
+            reviewPayload: reply.review ?? null,
+            status: reply.proposal?.status ?? reply.status,
+            baseRevisionId: reply.baseRevisionId ?? selectedDocument.currentRevisionId ?? null,
+          },
+        });
+        dispatch({ type: "setActiveSidebarView", payload: "review" });
+      }
+
+      const noticeTextStr = formatNotices(reply.notices);
+      if (noticeTextStr) {
+        dispatch({ type: "setBanner", payload: noticeTextStr });
+      } else if (reply.resultType === "revision_staged") {
+        dispatch({ type: "setBanner", payload: "Revision staged for review." });
+      }
+    } catch (error) {
+      const failedAssistantMessage: ChatMessage = {
+        ...assistantMessage,
+        role: "error",
+        content: getErrorMessage(error),
+        status: "error",
+        toolActivity: latestToolActivity,
+        notices: latestNotices,
+      };
+
+      dispatch({
+        type: "updateMessage",
+        payload: {
+          documentId: messageThreadId,
+          messageId: assistantMessage.id,
+          patch: {
+            role: "error",
+            content: getErrorMessage(error),
+            status: "error",
+            toolActivity: latestToolActivity,
+            notices: latestNotices,
+          },
+        },
+      });
+      dispatch({ type: "setBanner", payload: getErrorMessage(error) });
+
+      void syncChatSnapshot(
+        {
+          ...activeChat,
+          messages: [...historyUpToUser, failedAssistantMessage],
+          updatedAt: Date.now(),
+        },
+        "Failed to sync failed chat to backend:",
+      );
     } finally {
       abortControllerRef.current = null;
       dispatch({ type: "setIsSending", payload: false });
@@ -635,15 +1049,14 @@ export function AppProvider({ children }: PropsWithChildren) {
   }
 
   function clearChat() {
-    if (!selectedDocument) {
+    if (!selectedChat) {
       return;
     }
 
-    const messageThreadId = selectedChat?.id ?? selectedDocument.id;
-    dispatch({ type: "clearMessages", payload: messageThreadId });
+    dispatch({ type: "clearMessages", payload: selectedChat.id });
     dispatch({ type: "setComposer", payload: "" });
 
-    if (selectedChat && state.settings.apiBaseUrl.trim()) {
+    if (state.settings.apiBaseUrl.trim()) {
       updateChat(state.settings.apiBaseUrl, selectedChat.id, { messages: [] }).catch((error) => {
         console.error("Failed to clear chat on backend:", error);
         dispatch({ type: "setBanner", payload: "Chat cleared locally, but failed to sync the backend copy." });
@@ -656,14 +1069,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
 
-    const chat: Chat = {
-      id: crypto.randomUUID(),
-      name: `Chat ${new Date().toLocaleTimeString()}`,
-      documentId: selectedDocument.id,
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
+    const chat = createChatRecord(selectedDocument);
 
     dispatch({ type: "createChat", payload: { chat } });
     dispatch({ type: "setComposer", payload: "" });
@@ -671,7 +1077,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (state.settings.apiBaseUrl.trim()) {
       saveChat(state.settings.apiBaseUrl, chat)
         .then((savedChat) => {
-          dispatch({ type: "createChat", payload: { chat: savedChat as Chat } });
+          dispatch({ type: "hydrateChats", payload: [savedChat] });
         })
         .catch((error) => {
           console.error("Failed to save chat to backend:", error);
@@ -711,6 +1117,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       value={{
         state,
         selectedDocument,
+        selectedChat,
         currentMessages,
         importFiles,
         removeDocument,
@@ -720,6 +1127,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         updateSettings,
         testConnection,
         sendMessage,
+        retryMessage,
         cancelRequest,
         applyStagedRevision,
         rejectStagedRevision,

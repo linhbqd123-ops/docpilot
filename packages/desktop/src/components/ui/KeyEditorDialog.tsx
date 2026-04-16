@@ -1,38 +1,65 @@
 import { X, Loader } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MaskedKeyInput } from "./MaskedKeyInput";
 
 interface KeyEditorDialogProps {
     label: string;
     currentMaskedKey: string | null;
+    currentEndpoint?: string | null;
     isOpen: boolean;
     onClose: () => void;
     onSave: (key: string, endpoint?: string) => Promise<void>;
     onDelete?: () => Promise<void>;
     supportEndpoint?: boolean;
     endpointPlaceholder?: string;
+    requiresApiKey?: boolean;
 }
 
 export function KeyEditorDialog({
     label,
     currentMaskedKey,
+    currentEndpoint,
     isOpen,
     onClose,
     onSave,
     onDelete,
     supportEndpoint = false,
     endpointPlaceholder = "https://api.example.com",
+    requiresApiKey = true,
 }: KeyEditorDialogProps) {
     const [key, setKey] = useState("");
     const [endpoint, setEndpoint] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
+    useEffect(() => {
+        if (!isOpen) {
+            return;
+        }
+
+        setKey("");
+        setEndpoint(currentEndpoint ?? "");
+        setError("");
+    }, [currentEndpoint, isOpen]);
+
     if (!isOpen) return null;
 
     const handleSave = async () => {
-        if (!key.trim()) {
+        const trimmedKey = key.trim();
+        const trimmedEndpoint = endpoint.trim();
+
+        if (requiresApiKey && !supportEndpoint && !trimmedKey) {
             setError("API key cannot be empty");
+            return;
+        }
+
+        if (requiresApiKey && supportEndpoint && !trimmedKey && !trimmedEndpoint) {
+            setError("Enter an API key or provider URL");
+            return;
+        }
+
+        if (!requiresApiKey && supportEndpoint && !trimmedEndpoint) {
+            setError("Provider URL cannot be empty");
             return;
         }
 
@@ -40,7 +67,7 @@ export function KeyEditorDialog({
         setError("");
 
         try {
-            await onSave(key, endpoint || undefined);
+            await onSave(trimmedKey, trimmedEndpoint || undefined);
             setKey("");
             setEndpoint("");
             onClose();
@@ -52,9 +79,9 @@ export function KeyEditorDialog({
     };
 
     const handleDelete = async () => {
-        if (!currentMaskedKey || !onDelete) return;
+        if ((!currentMaskedKey && !currentEndpoint) || !onDelete) return;
 
-        if (!confirm(`Are you sure you want to delete the key for ${label}?`)) {
+        if (!confirm(`Are you sure you want to delete the saved configuration for ${label}?`)) {
             return;
         }
 
@@ -79,7 +106,7 @@ export function KeyEditorDialog({
                 {/* Header */}
                 <div className="flex items-center justify-between p-4 border-b border-docpilot-border">
                     <h2 className="font-semibold text-docpilot-textStrong">
-                        {currentMaskedKey ? "Update" : "Add"} {label} Key
+                        {requiresApiKey ? `${currentMaskedKey ? "Update" : "Add"} ${label} credentials` : `Configure ${label}`}
                     </h2>
                     <button
                         onClick={onClose}
@@ -91,21 +118,23 @@ export function KeyEditorDialog({
 
                 {/* Body */}
                 <div className="p-4 space-y-4">
-                    <MaskedKeyInput
-                        label="API Key"
-                        value={key}
-                        onChange={setKey}
-                        maskedDisplay={currentMaskedKey}
-                        onClear={() => setKey("")}
-                        disabled={loading}
-                        placeholder="Paste your API key here..."
-                        error={error}
-                    />
+                    {requiresApiKey ? (
+                        <MaskedKeyInput
+                            label="API Key"
+                            value={key}
+                            onChange={setKey}
+                            maskedDisplay={currentMaskedKey}
+                            onClear={() => setKey("")}
+                            disabled={loading}
+                            placeholder="Paste your API key here..."
+                            error={error}
+                        />
+                    ) : null}
 
                     {supportEndpoint && (
                         <div className="space-y-2">
                             <label className="block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
-                                Endpoint (Optional)
+                                {requiresApiKey ? "Provider URL (Optional)" : "Provider URL"}
                             </label>
                             <input
                                 type="text"
@@ -115,6 +144,11 @@ export function KeyEditorDialog({
                                 disabled={loading}
                                 className="field-shell w-full"
                             />
+                            <p className="text-xs text-docpilot-muted">
+                                {requiresApiKey
+                                    ? "Override the provider's default endpoint only when needed."
+                                    : "DocPilot will call this provider URL through the bundled backend."}
+                            </p>
                         </div>
                     )}
 
@@ -127,7 +161,7 @@ export function KeyEditorDialog({
 
                 {/* Footer */}
                 <div className="flex gap-2 p-4 pl-0 border-t border-docpilot-border bg-docpilot-chrome">
-                    {currentMaskedKey && onDelete && (
+                    {(currentMaskedKey || currentEndpoint) && onDelete && (
                         <button
                             onClick={handleDelete}
                             disabled={loading}

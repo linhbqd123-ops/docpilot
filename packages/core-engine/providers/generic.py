@@ -34,8 +34,6 @@ class GenericOpenAIProvider(BaseProvider):
         messages: list[dict],
         model: str | None = None,
     ) -> AsyncIterator[str]:
-        key = getattr(self.client, "api_key", None)
-        print(f"[stream_chat] Using API key: {key if key else 'None'}")
         stream = await self.client.chat.completions.create(
             model=model or self.default_model,
             messages=messages,

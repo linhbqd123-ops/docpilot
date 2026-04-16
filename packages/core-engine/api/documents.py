@@ -1,14 +1,19 @@
 import html as html_module
+from functools import lru_cache
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.chats import get_chat_store
+from config import settings
+from services.chat_store import SQLiteChatStore
 from services.doc_mcp_client import (
     DocMcpClient,
     DocMcpResponseError,
     DocMcpUnavailableError,
 )
+from services.document_store import SQLiteDocumentStore
 
 router = APIRouter()
 
@@ -47,6 +52,81 @@ def _text_to_html(text: str) -> str:
 
 def _doc_mcp_client() -> DocMcpClient:
     return DocMcpClient()
+
+
+@lru_cache(maxsize=1)
+def get_document_store() -> SQLiteDocumentStore:
+    return SQLiteDocumentStore(settings.chat_database_path)
+
+
+class LibraryDocumentRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    kind: str
+    mimeType: str = ""
+    size: int = 0
+    status: str = "ready"
+    html: str = ""
+    outline: list[dict] = Field(default_factory=list)
+    wordCount: int = 0
+    createdAt: int
+    updatedAt: int
+    backendDocId: str | None = None
+    documentSessionId: str | None = None
+    baseRevisionId: str | None = None
+    currentRevisionId: str | None = None
+    pendingRevisionId: str | None = None
+    revisionStatus: str | None = None
+    sessionState: str | None = None
+    reviewPayload: dict | None = None
+    revisions: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
+@router.get("/documents")
+async def list_library_documents(store: SQLiteDocumentStore = Depends(get_document_store)):
+    return {"documents": store.list_documents()}
+
+
+@router.get("/documents/{document_id}")
+async def get_library_document(
+    document_id: str,
+    store: SQLiteDocumentStore = Depends(get_document_store),
+):
+    document = store.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"document": document}
+
+
+@router.post("/documents")
+async def create_or_replace_library_document(
+    body: LibraryDocumentRequest,
+    store: SQLiteDocumentStore = Depends(get_document_store),
+):
+    document = store.create_or_replace_document(body.model_dump())
+    return {"document": document}
+
+
+@router.delete("/documents/{document_id}")
+async def delete_library_document(
+    document_id: str,
+    store: SQLiteDocumentStore = Depends(get_document_store),
+    chat_store: SQLiteChatStore = Depends(get_chat_store),
+):
+    deleted = store.delete_document(document_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+    chat_store.delete_chats_for_document(document_id)
+    return {"ok": True}
+
+
+@router.delete("/documents")
+async def delete_all_library_documents(store: SQLiteDocumentStore = Depends(get_document_store)):
+    store.delete_all_documents()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

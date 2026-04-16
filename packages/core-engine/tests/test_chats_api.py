@@ -178,3 +178,45 @@ def test_legacy_json_is_migrated_into_sqlite_on_first_open(tmp_path: Path) -> No
     reloaded = SQLiteChatStore(database_path, legacy_path)
     reloaded_chats = reloaded.list_chats()
     assert reloaded_chats == migrated
+
+
+def test_chat_message_metadata_round_trips_without_being_dropped(tmp_path: Path) -> None:
+    store = SQLiteChatStore(tmp_path / "docpilot.db")
+
+    with TestClient(build_chat_app(store)) as client:
+        response = client.post(
+            "/api/chats",
+            json={
+                "id": "chat-with-metadata",
+                "name": "Inference visible",
+                "documentId": "doc-meta-1",
+                "messages": [
+                    {
+                        "id": "msg-assistant-1",
+                        "role": "assistant",
+                        "content": "Summary ready.",
+                        "createdAt": 1712000000000,
+                        "status": "sent",
+                        "toolActivity": [
+                            {"event": "tool_started", "tool": "answer_about_document"},
+                            {"event": "tool_finished", "tool": "llm_inference", "phase": "compose_answer"},
+                        ],
+                        "notices": [
+                            {"code": "agent_risks", "items": ["Verify the timeline before export."]}
+                        ],
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        saved = response.json()["chat"]
+        assert saved["messages"][0]["toolActivity"][0]["tool"] == "answer_about_document"
+        assert saved["messages"][0]["toolActivity"][1]["phase"] == "compose_answer"
+        assert saved["messages"][0]["notices"][0]["code"] == "agent_risks"
+
+        reloaded = client.get("/api/chats/chat-with-metadata")
+        assert reloaded.status_code == 200
+        payload = reloaded.json()["chat"]
+        assert payload["messages"][0]["toolActivity"][0]["event"] == "tool_started"
+        assert payload["messages"][0]["notices"][0]["items"] == ["Verify the timeline before export."]

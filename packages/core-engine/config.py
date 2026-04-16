@@ -57,14 +57,17 @@ class Settings(BaseSettings):
 
     # ── Groq ────────────────────────────────────────────────────────────────
     groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_default_model: str = "llama-3.3-70b-versatile"
 
     # ── OpenRouter ──────────────────────────────────────────────────────────
     openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_default_model: str = "meta-llama/llama-3.3-70b-instruct"
 
     # ── TogetherAI ──────────────────────────────────────────────────────────
     together_api_key: str = ""
+    together_base_url: str = "https://api.together.xyz/v1"
     together_default_model: str = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 
     # ── z.ai ────────────────────────────────────────────────────────────────
@@ -74,6 +77,7 @@ class Settings(BaseSettings):
 
     # ── Anthropic (own SDK — Messages API format) ───────────────────────────
     anthropic_api_key: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com"
     anthropic_default_model: str = "claude-3-5-sonnet-20241022"
 
     # ── Azure OpenAI (own SDK — different auth model) ───────────────────────

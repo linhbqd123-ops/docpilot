@@ -66,9 +66,71 @@ public class HtmlProjectionService {
 
     private void renderChildren(List<DocumentComponent> children, StringBuilder html, int depth) {
         if (children == null) return;
-        for (DocumentComponent child : children) {
+        for (int index = 0; index < children.size(); ) {
+            DocumentComponent child = children.get(index);
+            if (child.getType() == ComponentType.LIST_ITEM) {
+                index = renderListSequence(children, index, html, depth);
+                continue;
+            }
             renderComponent(child, html, depth);
+            index++;
         }
+    }
+
+    private int renderListSequence(List<DocumentComponent> children, int startIndex, StringBuilder html, int depth) {
+        DocumentComponent first = children.get(startIndex);
+        int level = listLevel(first);
+        String listTag = listTag(first);
+
+        html.append("<").append(listTag).append(">\n");
+
+        int index = startIndex;
+        while (index < children.size()) {
+            DocumentComponent child = children.get(index);
+            if (child.getType() != ComponentType.LIST_ITEM) {
+                break;
+            }
+
+            int childLevel = listLevel(child);
+            if (childLevel < level) {
+                break;
+            }
+            if (childLevel > level) {
+                index = renderListSequence(children, index, html, depth + 1);
+                continue;
+            }
+            if (!listTag.equals(listTag(child)) && index > startIndex) {
+                break;
+            }
+
+            html.append("<li ").append(dataAttrs(child))
+                .append(" data-list-level=\"").append(level).append("\"")
+                .append(inlineStyle(child)).append(">");
+            renderListItemContent(child, html, depth + 1);
+            index++;
+
+            while (index < children.size()) {
+                DocumentComponent next = children.get(index);
+                if (next.getType() != ComponentType.LIST_ITEM || listLevel(next) <= level) {
+                    break;
+                }
+                index = renderListSequence(children, index, html, depth + 1);
+            }
+
+            html.append("</li>\n");
+
+            if (index < children.size()) {
+                DocumentComponent next = children.get(index);
+                if (next.getType() == ComponentType.LIST_ITEM
+                    && listLevel(next) == level
+                    && !listTag.equals(listTag(next))) {
+                    break;
+                }
+            }
+        }
+
+        html.append("</").append(listTag).append(">\n");
+        return index;
     }
 
     private void renderComponent(DocumentComponent c, StringBuilder html, int depth) {
@@ -135,6 +197,20 @@ public class HtmlProjectionService {
             appendTextContent(c, html);
         }
         html.append("</li>\n");
+    }
+
+    private void renderListItemContent(DocumentComponent c, StringBuilder html, int depth) {
+        if (hasRunChildren(c)) {
+            renderChildren(c.getChildren(), html, depth + 1);
+            return;
+        }
+
+        if (c.getChildren() != null && !c.getChildren().isEmpty()) {
+            renderChildren(c.getChildren(), html, depth + 1);
+            return;
+        }
+
+        appendTextContent(c, html);
     }
 
     private void renderTable(DocumentComponent c, StringBuilder html, int depth) {
@@ -269,6 +345,25 @@ public class HtmlProjectionService {
         return c.getChildren() != null
             && !c.getChildren().isEmpty()
             && c.getChildren().stream().anyMatch(ch -> ch.getType() == ComponentType.TEXT_RUN);
+    }
+
+    private int listLevel(DocumentComponent component) {
+        if (component.getLayoutProps() == null || component.getLayoutProps().getListLevel() == null) {
+            return 0;
+        }
+        return Math.max(0, component.getLayoutProps().getListLevel());
+    }
+
+    private String listTag(DocumentComponent component) {
+        if (component.getLayoutProps() == null || component.getLayoutProps().getListType() == null) {
+            return "ul";
+        }
+
+        String listType = component.getLayoutProps().getListType().toUpperCase();
+        return switch (listType) {
+            case "DECIMAL", "ALPHA_UPPER", "ALPHA_LOWER", "ROMAN_UPPER", "ROMAN_LOWER" -> "ol";
+            default -> "ul";
+        };
     }
 
     private String escapeHtml(String text) {

@@ -125,6 +125,12 @@ class SQLiteChatStore:
                 cursor = connection.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
                 return cursor.rowcount > 0
 
+    def delete_chats_for_document(self, document_id: str) -> int:
+        with self._lock:
+            with self._connect() as connection:
+                cursor = connection.execute("DELETE FROM chats WHERE document_id = ?", (document_id,))
+                return cursor.rowcount
+
     def delete_all_chats(self) -> None:
         with self._lock:
             with self._connect() as connection:

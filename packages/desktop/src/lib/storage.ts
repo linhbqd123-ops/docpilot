@@ -1,42 +1,55 @@
 import type { AppState, PersistedState } from "@/app/types";
+import { DEFAULT_SETTINGS } from "@/app/reducer";
 import { rehydrateDocument } from "@/lib/document";
 
 const STORAGE_KEY = "docpilot.desktop.state";
 
-export function loadPersistedState(): Partial<PersistedState> {
+function readPersistedState(): PersistedState | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
 
     if (!raw) {
-      return {};
+      return null;
     }
 
-    const parsed = JSON.parse(raw) as PersistedState;
-
-    return {
-      ...parsed,
-      documents: (parsed.documents ?? []).map(rehydrateDocument),
-      chats: parsed.chats ?? [],
-      selectedChatId: parsed.selectedChatId ?? null,
-      messageThreads: parsed.messageThreads ?? {},
-    };
+    return JSON.parse(raw) as PersistedState;
   } catch {
+    return null;
+  }
+}
+
+export function loadPersistedState(): Partial<PersistedState> {
+  const parsed = readPersistedState();
+
+  if (!parsed) {
     return {};
   }
+
+  return {
+    ...parsed,
+    documents: [],
+    chats: parsed.chats ?? [],
+    selectedChatId: null,
+    messageThreads: parsed.messageThreads ?? {},
+  };
+}
+
+export function loadLegacyDocumentsSnapshot() {
+  const parsed = readPersistedState();
+  return (parsed?.documents ?? []).map(rehydrateDocument);
 }
 
 export function savePersistedState(state: AppState) {
   const payload: PersistedState = {
-    documents: state.documents,
+    documents: [],
     selectedDocumentId: state.selectedDocumentId,
     chats: state.chats,
-    selectedChatId: state.selectedChatId,
+    selectedChatId: null,
     messageThreads: state.messageThreads,
     settings: {
       ...state.settings,
-      // CRITICAL: Never persist apiBaseUrl - it must always come from DEFAULT_SETTINGS
-      // This prevents accidentally saving a provider endpoint value as apiBaseUrl
-      apiBaseUrl: "http://localhost:8000",
+      // Never persist apiBaseUrl from runtime state. The bundled build decides it.
+      apiBaseUrl: DEFAULT_SETTINGS.apiBaseUrl,
     },
     activeSidebarView: state.activeSidebarView,
   };

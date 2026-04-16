@@ -33,10 +33,22 @@ def _get_provider_endpoint_env_name(provider: str) -> str:
     """Get endpoint env var name (matches api/keys.py naming convention)."""
     if provider == "azure":
         return "AZURE_OPENAI_ENDPOINT"
+    elif provider == "openai":
+        return "OPENAI_BASE_URL"
+    elif provider == "groq":
+        return "GROQ_BASE_URL"
+    elif provider == "openrouter":
+        return "OPENROUTER_BASE_URL"
+    elif provider == "together":
+        return "TOGETHER_BASE_URL"
     elif provider == "zai":
         return "ZAI_BASE_URL"
+    elif provider == "anthropic":
+        return "ANTHROPIC_BASE_URL"
     elif provider == "ollama":
         return "OLLAMA_BASE_URL"
+    elif provider == "custom":
+        return "CUSTOM_BASE_URL"
     else:
         return f"{provider.upper()}_ENDPOINT"
 
@@ -60,7 +72,12 @@ class ProviderConfig:
         # Map base_url_env var names to settings attributes
         base_url_map = {
             "OLLAMA_BASE_URL": settings.ollama_base_url,
+            "OPENAI_BASE_URL": settings.openai_base_url,
+            "GROQ_BASE_URL": settings.groq_base_url,
+            "OPENROUTER_BASE_URL": settings.openrouter_base_url,
+            "TOGETHER_BASE_URL": settings.together_base_url,
             "ZAI_BASE_URL": settings.zai_base_url,
+            "ANTHROPIC_BASE_URL": settings.anthropic_base_url,
             "CUSTOM_BASE_URL": settings.custom_base_url,
             "AZURE_OPENAI_ENDPOINT": settings.azure_openai_endpoint,
         }
@@ -124,6 +141,7 @@ REGISTRY: dict[str, ProviderConfig] = {
     "openai": ProviderConfig(
         display_name="OpenAI",
         base_url="https://api.openai.com/v1",
+        base_url_env="OPENAI_BASE_URL",
         api_key_env="OPENAI_API_KEY",
         default_model="gpt-4o",
         default_model_env="OPENAI_DEFAULT_MODEL",
@@ -131,6 +149,7 @@ REGISTRY: dict[str, ProviderConfig] = {
     "groq": ProviderConfig(
         display_name="Groq",
         base_url="https://api.groq.com/openai/v1",
+        base_url_env="GROQ_BASE_URL",
         api_key_env="GROQ_API_KEY",
         default_model="llama-3.3-70b-versatile",
         default_model_env="GROQ_DEFAULT_MODEL",
@@ -138,6 +157,7 @@ REGISTRY: dict[str, ProviderConfig] = {
     "openrouter": ProviderConfig(
         display_name="OpenRouter",
         base_url="https://openrouter.ai/api/v1",
+        base_url_env="OPENROUTER_BASE_URL",
         api_key_env="OPENROUTER_API_KEY",
         default_model="meta-llama/llama-3.3-70b-instruct",
         default_model_env="OPENROUTER_DEFAULT_MODEL",
@@ -150,6 +170,7 @@ REGISTRY: dict[str, ProviderConfig] = {
     "together": ProviderConfig(
         display_name="TogetherAI",
         base_url="https://api.together.xyz/v1",
+        base_url_env="TOGETHER_BASE_URL",
         api_key_env="TOGETHER_API_KEY",
         default_model="meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
         default_model_env="TOGETHER_DEFAULT_MODEL",
@@ -165,6 +186,8 @@ REGISTRY: dict[str, ProviderConfig] = {
     "anthropic": ProviderConfig(
         display_name="Anthropic",
         kind="anthropic",
+        base_url="https://api.anthropic.com",
+        base_url_env="ANTHROPIC_BASE_URL",
         api_key_env="ANTHROPIC_API_KEY",
         default_model="claude-3-5-sonnet-20241022",
         default_model_env="ANTHROPIC_DEFAULT_MODEL",
@@ -172,6 +195,7 @@ REGISTRY: dict[str, ProviderConfig] = {
     "azure": ProviderConfig(
         display_name="Azure OpenAI",
         kind="azure",
+        base_url_env="AZURE_OPENAI_ENDPOINT",
         # Azure credentials come from dedicated env vars in config.py
     ),
     "custom": ProviderConfig(
@@ -207,6 +231,7 @@ def get_provider(name: ProviderName, model_override: str | None = None) -> BaseP
         return AnthropicProvider(
             api_key=cfg.resolve_api_key(),
             default_model=model_override or cfg.resolve_model(),
+            base_url=cfg.resolve_base_url(name),
         )
 
     if cfg.kind == "azure":

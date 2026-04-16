@@ -12,8 +12,8 @@ class AnthropicProvider(BaseProvider):
     compatible with the OpenAI /v1/chat/completions standard.
     """
 
-    def __init__(self, api_key: str, default_model: str) -> None:
-        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(self, api_key: str, default_model: str, base_url: str | None = None) -> None:
+        self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url or None)
         self.default_model = default_model
 
     def _split_messages(self, messages: list[dict]) -> tuple[str, list[dict]]:

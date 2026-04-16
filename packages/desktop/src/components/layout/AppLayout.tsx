@@ -96,13 +96,8 @@ export function AppLayout() {
 
           <footer className="flex h-9 items-center justify-between border-t border-docpilot-border bg-docpilot-rail px-4 text-xs text-docpilot-muted backdrop-blur-xl">
             <div className="flex items-center gap-4">
-              <span>
-                Backend: {state.connection.status}
-                {state.connection.version ? ` (${state.connection.version})` : ""}
-              </span>
-              <span>
-                API: {state.settings.apiBaseUrl.trim() || "not configured"}
-              </span>
+              <span>Provider: {state.settings.provider}</span>
+              {state.settings.modelOverride.trim() ? <span>Model: {state.settings.modelOverride.trim()}</span> : null}
             </div>
             <div className="flex items-center gap-4">
               <button

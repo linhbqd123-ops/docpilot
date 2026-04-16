@@ -3,72 +3,18 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { KeyEditorDialog } from "./KeyEditorDialog";
 import { cn } from "@/lib/utils";
 import { HTTPClient } from "@/lib/api";
-
-interface ProviderInfo {
-    provider: string;
-    label: string;
-    icon?: string;
-    supportEndpoint?: boolean;
-    endpointPlaceholder?: string;
-}
-
-interface ProviderStatus {
-    provider: string;
-    has_key: boolean;
-    masked_key?: string | null;
-}
+import { PROVIDER_DEFINITIONS, type ProviderStatusPayload } from "@/lib/providers";
 
 interface KeyManagerProps {
     baseUrl: string;
     selectedProvider?: string;
 }
 
-const PROVIDERS: ProviderInfo[] = [
-    {
-        provider: "openai",
-        label: "OpenAI",
-    },
-    {
-        provider: "groq",
-        label: "Groq",
-    },
-    {
-        provider: "anthropic",
-        label: "Anthropic / Claude",
-    },
-    {
-        provider: "azure",
-        label: "Azure OpenAI",
-        supportEndpoint: true,
-        endpointPlaceholder: "https://your-resource.openai.azure.com",
-    },
-    {
-        provider: "openrouter",
-        label: "OpenRouter",
-    },
-    {
-        provider: "together",
-        label: "TogetherAI",
-    },
-    {
-        provider: "zai",
-        label: "Z.AI",
-        supportEndpoint: true,
-        endpointPlaceholder: "https://api.z.ai/api/v1",
-    },
-    {
-        provider: "ollama",
-        label: "Ollama (Local)",
-        supportEndpoint: true,
-        endpointPlaceholder: "http://localhost:11434",
-    },
-];
-
 export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [editingProvider, setEditingProvider] = useState<string | null>(null);
-    const [statusMap, setStatusMap] = useState<Record<string, ProviderStatus>>({});
+    const [statusMap, setStatusMap] = useState<Record<string, ProviderStatusPayload>>({});
 
     // Memoize API client - only recreate when baseUrl changes
     const apiClient = useMemo(() => new HTTPClient(baseUrl), [baseUrl]);
@@ -78,9 +24,9 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
         setError("");
 
         try {
-            const response = await apiClient.get<{ providers: ProviderStatus[] }>("/api/keys/list");
+            const response = await apiClient.get<{ providers: ProviderStatusPayload[] }>("/api/keys/list");
             const providers = response.data.providers ?? [];
-            const map: Record<string, ProviderStatus> = {};
+            const map: Record<string, ProviderStatusPayload> = {};
 
             for (const providerStatus of providers) {
                 map[providerStatus.provider] = providerStatus;
@@ -131,6 +77,11 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
         void loadProviderStatus();
     }, [loadProviderStatus]);
 
+    const visibleProviders = (selectedProvider
+        ? PROVIDER_DEFINITIONS.filter((provider) => provider.id === selectedProvider)
+        : PROVIDER_DEFINITIONS
+    ).filter((provider) => provider.requiresApiKey);
+
     if (loading) {
         return (
             <div className="flex items-center justify-center py-8">
@@ -143,10 +94,10 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
         <div className="space-y-4">
             <div>
                 <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
-                    API Keys Management
+                    API key
                 </label>
                 <p className="text-sm text-docpilot-muted">
-                    Securely store your API keys. Keys are encrypted and never logged on the frontend.
+                    Save the API key for the selected provider. Provider URLs are managed above.
                 </p>
             </div>
 
@@ -158,16 +109,14 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
             )}
 
             <div className="space-y-2">
-                {(
-                    selectedProvider ? PROVIDERS.filter((p) => p.provider === selectedProvider) : PROVIDERS
-                ).map((providerInfo) => {
-                    const status = statusMap[providerInfo.provider];
+                {visibleProviders.map((providerInfo) => {
+                    const status = statusMap[providerInfo.id];
                     const hasKey = status?.has_key || false;
                     const maskedKey = status?.masked_key || null;
 
                     return (
                         <div
-                            key={providerInfo.provider}
+                            key={providerInfo.id}
                             className="subtle-card flex items-center justify-between gap-4 p-4 text-sm"
                         >
                             <div>
@@ -178,38 +127,39 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
                                     <div className="mt-1 font-mono text-xs text-docpilot-muted">
                                         {maskedKey}
                                     </div>
-                                ) : (
+                                ) : null}
+                                {!hasKey ? (
                                     <div className="mt-1 text-xs text-docpilot-muted">
                                         No key configured
                                     </div>
-                                )}
+                                ) : null}
                             </div>
 
                             <button
-                                onClick={() => setEditingProvider(providerInfo.provider)}
+                                onClick={() => setEditingProvider(providerInfo.id)}
                                 className={cn(
                                     "p-2 rounded transition-colors",
                                     hasKey
                                         ? "bg-docpilot-surface hover:bg-docpilot-border text-docpilot-text"
                                         : "bg-docpilot-accent/10 hover:bg-docpilot-accent/20 text-docpilot-accent",
                                 )}
-                                title={hasKey ? "Update key" : "Add key"}
+                                title={hasKey ? "Update API key" : "Add API key"}
                             >
                                 <Edit2 size={16} />
                             </button>
 
-                            {editingProvider === providerInfo.provider && (
+                            {editingProvider === providerInfo.id && (
                                 <KeyEditorDialog
                                     label={providerInfo.label}
                                     currentMaskedKey={maskedKey}
                                     isOpen={true}
                                     onClose={() => setEditingProvider(null)}
-                                    onSave={(key, endpoint) =>
-                                        handleSaveKey(providerInfo.provider, key, endpoint)
+                                    onSave={(key) =>
+                                        handleSaveKey(providerInfo.id, key)
                                     }
-                                    onDelete={() => handleDeleteKey(providerInfo.provider)}
-                                    supportEndpoint={providerInfo.supportEndpoint}
-                                    endpointPlaceholder={providerInfo.endpointPlaceholder}
+                                    onDelete={() => handleDeleteKey(providerInfo.id)}
+                                    supportEndpoint={false}
+                                    requiresApiKey={true}
                                 />
                             )}
                         </div>
@@ -217,13 +167,21 @@ export function KeyManager({ baseUrl, selectedProvider }: KeyManagerProps) {
                 })}
             </div>
 
+            {visibleProviders.length === 0 ? (
+                <div className="subtle-card p-4 text-sm text-docpilot-muted">
+                    {selectedProvider === "ollama"
+                        ? "Ollama does not need an API key. Only the provider URL matters."
+                        : "This provider does not need an API key in the current setup."}
+                </div>
+            ) : null}
+
             <div className="mt-6 p-3 bg-blue-500/10 border border-blue-500/30 rounded text-sm text-blue-600">
-                <div className="font-medium mb-1">🔒 Security Note</div>
+                <div className="font-medium mb-1">Security note</div>
                 <ul className="space-y-1 text-xs">
                     <li>• Keys are encrypted before being stored locally</li>
                     <li>• Keys are never exposed in frontend storage or logs</li>
-                    <li>• Changes to keys are synced to the backend immediately</li>
-                    <li>• Deleting a key will update all providers using it</li>
+                    <li>• Changes are synced to the backend immediately</li>
+                    <li>• Deleting a key does not change the provider URL override</li>
                 </ul>
             </div>
         </div>

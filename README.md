@@ -47,7 +47,7 @@ Run:
 ```powershell
 cd packages/core-engine
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1 or .venv\Scripts\activate (cmd)
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```

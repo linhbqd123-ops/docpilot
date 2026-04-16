@@ -1,13 +1,9 @@
 package io.docpilot.mcp.personalization;
 
 import io.docpilot.mcp.model.session.DocumentSession;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.stereotype.Service;
 
 import java.util.List;
 
-@Service
-@ConditionalOnMissingBean(SemanticSearchService.class)
 public class DisabledSemanticSearchService implements SemanticSearchService {
 
     @Override
