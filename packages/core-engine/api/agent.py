@@ -46,6 +46,22 @@ class WorkspaceContext(BaseModel):
         }
 
 
+class AgentExecutionConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    max_input_tokens: int | None = Field(default=None, alias="maxInputTokens")
+    session_context_budget_tokens: int | None = Field(default=None, alias="sessionContextBudgetTokens")
+    tool_result_budget_tokens: int | None = Field(default=None, alias="toolResultBudgetTokens")
+    max_tool_batch_size: int | None = Field(default=None, alias="maxToolBatchSize")
+    max_parallel_tools: int | None = Field(default=None, alias="maxParallelTools")
+    max_heavy_tools_per_turn: int | None = Field(default=None, alias="maxHeavyToolsPerTurn")
+    auto_compact_session: bool | None = Field(default=None, alias="autoCompactSession")
+    auto_compact_threshold: float | None = Field(default=None, alias="autoCompactThreshold")
+
+    def to_payload(self) -> dict[str, Any]:
+        return self.model_dump(by_alias=True, exclude_none=True)
+
+
 class TurnHistoryMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
@@ -63,6 +79,7 @@ class AgentTurnRequest(BaseModel):
     prompt: Annotated[str, Field(min_length=1)]
     selection: SelectionContext | None = None
     workspace_context: WorkspaceContext | None = Field(default=None, alias="workspaceContext")
+    agent_config: AgentExecutionConfig | None = Field(default=None, alias="agentConfig")
     history: list[TurnHistoryMessage] = Field(default_factory=list)
 
 
@@ -91,8 +108,11 @@ def _mapped_doc_mcp_error(exc: Exception) -> MappedDocMcpError:
         internal_message="The assistant could not complete the document request right now. Please try again.",
     )
 
+import logging
+logging.basicConfig(level=logging.ERROR)
 
 def _map_doc_mcp_error(exc: Exception) -> HTTPException:
+    logging.error("Document MCP error occurred", exc_info=exc)
     mapped = _mapped_doc_mcp_error(exc)
     return HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
@@ -114,12 +134,14 @@ async def _run_turn(request: AgentTurnRequest):
         prompt=request.prompt,
         selection=request.selection.model_dump(by_alias=True) if request.selection else None,
         workspaceContext=request.workspace_context.model_dump(by_alias=True) if request.workspace_context else None,
+        agentConfig=request.agent_config.model_dump(by_alias=True) if request.agent_config else None,
         history=[message.model_dump() for message in request.history],
     )
     provider = _resolve_provider(request.provider, request.model)
     history = [message.model_dump() for message in request.history]
     selection = request.selection.to_payload() if request.selection else None
     workspace_context = request.workspace_context.to_payload() if request.workspace_context else None
+    agent_config = request.agent_config.to_payload() if request.agent_config else None
 
     async for event_type, data in stream_turn(
         provider,
@@ -129,6 +151,7 @@ async def _run_turn(request: AgentTurnRequest):
         base_revision_id=request.base_revision_id,
         selection=selection,
         workspace_context=workspace_context,
+        execution_config=agent_config,
         history=history,
     ):
         yield event_type, data

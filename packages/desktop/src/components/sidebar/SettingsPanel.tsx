@@ -80,6 +80,157 @@ export function SettingsPanel() {
             />
           </div>
 
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Max input tokens
+              </label>
+              <input
+                type="number"
+                min={1200}
+                step={100}
+                value={state.settings.agentConfig.maxInputTokens}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      maxInputTokens: Math.max(1200, Number(event.target.value) || 1200),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Session context budget
+              </label>
+              <input
+                type="number"
+                min={400}
+                step={100}
+                value={state.settings.agentConfig.sessionContextBudgetTokens}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      sessionContextBudgetTokens: Math.max(400, Number(event.target.value) || 400),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Tool result budget
+              </label>
+              <input
+                type="number"
+                min={240}
+                step={100}
+                value={state.settings.agentConfig.toolResultBudgetTokens}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      toolResultBudgetTokens: Math.max(240, Number(event.target.value) || 240),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Max tools per batch
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={8}
+                step={1}
+                value={state.settings.agentConfig.maxToolBatchSize}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      maxToolBatchSize: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Max parallel tools
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={8}
+                step={1}
+                value={state.settings.agentConfig.maxParallelTools}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      maxParallelTools: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
+                Max heavy tools per turn
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={8}
+                step={1}
+                value={state.settings.agentConfig.maxHeavyToolsPerTurn}
+                onChange={(event) =>
+                  updateSettings({
+                    agentConfig: {
+                      ...state.settings.agentConfig,
+                      maxHeavyToolsPerTurn: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                    },
+                  })
+                }
+                className="field-shell w-full"
+              />
+            </div>
+          </div>
+
+          <label className="subtle-card flex items-center justify-between gap-4 px-4 py-3 text-sm text-docpilot-text">
+            <span>
+              <span className="block font-medium text-docpilot-textStrong">Auto-compact session context</span>
+              <span className="mt-1 block text-docpilot-muted">Summarize older turns automatically when the request is close to the configured input budget.</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={state.settings.agentConfig.autoCompactSession}
+              onChange={(event) =>
+                updateSettings({
+                  agentConfig: {
+                    ...state.settings.agentConfig,
+                    autoCompactSession: event.target.checked,
+                  },
+                })
+              }
+              className="h-4 w-4 rounded border-docpilot-border bg-transparent"
+            />
+          </label>
+
           <label className="subtle-card flex items-center justify-between gap-4 px-4 py-3 text-sm text-docpilot-text">
             <span>
               <span className="block font-medium text-docpilot-textStrong">Stream assistant responses</span>

@@ -100,5 +100,15 @@ class Settings(BaseSettings):
     # ── Processing limits ───────────────────────────────────────────────────
     request_timeout_seconds: int = 120
 
+    # ── Agent orchestration controls ────────────────────────────────────────
+    agent_max_input_tokens: int = 6000
+    agent_session_context_budget_tokens: int = 4200
+    agent_tool_result_budget_tokens: int = 2200
+    agent_max_tool_batch_size: int = 4
+    agent_max_parallel_tools: int = 3
+    agent_max_heavy_tools_per_turn: int = 1
+    agent_auto_compact_session: bool = True
+    agent_auto_compact_threshold: float = 0.82
+
 
 settings = Settings()

@@ -145,6 +145,12 @@ function activityLabel(activity: ToolActivity) {
   if (tool === "get_analysis_html") {
     return "Loaded analysis HTML";
   }
+  if (tool === "tool_batch") {
+    return "Executed tool batch";
+  }
+  if (tool === "compact_session_context") {
+    return "Compacted session context";
+  }
   if (tool === "get_html_projection") {
     return "Read document projection (legacy)";
   }
@@ -206,6 +212,30 @@ function activityDetail(activity: ToolActivity) {
 
   if (tool === "get_analysis_html" && event === "tool_finished") {
     return "Compact analysis HTML loaded for additional AI context";
+  }
+
+  if (tool === "tool_batch") {
+    const execution = asString(activity.execution);
+    const toolCount = asNumber(activity.completedToolCount ?? activity.toolCount);
+    const parts = [execution ? `${execution} batch` : "tool batch"];
+    if (toolCount !== null) {
+      parts.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
+    }
+    return parts.join(" · ");
+  }
+
+  if (tool === "compact_session_context") {
+    const original = asNumber(activity.originalEstimatedInputTokens);
+    const final = asNumber(activity.finalEstimatedInputTokens);
+    const summarized = asNumber(activity.summarizedMessageCount);
+    const parts = ["Older turns summarized"];
+    if (original !== null && final !== null) {
+      parts.push(`~${formatCompactMetric(original)} -> ~${formatCompactMetric(final)} tok`);
+    }
+    if (summarized !== null) {
+      parts.push(`${summarized} msg`);
+    }
+    return parts.join(" · ");
   }
 
   if (tool === "get_html_projection" && event === "tool_finished") {
@@ -294,11 +324,14 @@ function noticeText(notice: AgentNotice) {
 }
 
 function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number): TurnUsageRequest | null {
-  if (asString(activity.tool) !== "llm_inference" || asString(activity.event) !== "tool_finished") {
+  const event = asString(activity.event);
+  if (asString(activity.tool) !== "llm_inference" || (event !== "tool_started" && event !== "tool_finished")) {
     return null;
   }
 
   const requestIndex = asNumber(activity.requestIndex ?? activity.request_index) ?? fallbackIndex;
+  const estimatedInputTokens = asNumber(activity.estimatedInputTokens ?? activity.estimated_input_tokens) ?? 0;
+  const estimatedOutputTokens = asNumber(activity.estimatedOutputTokens ?? activity.estimated_output_tokens) ?? 0;
 
   return {
     requestIndex,
@@ -308,25 +341,61 @@ function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number)
     model: asString(activity.model) || null,
     inputChars: asNumber(activity.inputChars ?? activity.input_chars) ?? 0,
     outputChars: asNumber(activity.outputChars ?? activity.output_chars) ?? asNumber(activity.charCount) ?? 0,
-    estimatedInputTokens: asNumber(activity.estimatedInputTokens ?? activity.estimated_input_tokens) ?? 0,
-    estimatedOutputTokens: asNumber(activity.estimatedOutputTokens ?? activity.estimated_output_tokens) ?? 0,
-    estimatedTotalTokens: asNumber(activity.estimatedTotalTokens ?? activity.estimated_total_tokens) ?? 0,
+    estimatedInputTokens,
+    estimatedOutputTokens,
+    estimatedTotalTokens:
+      asNumber(activity.estimatedTotalTokens ?? activity.estimated_total_tokens)
+      ?? estimatedInputTokens + estimatedOutputTokens,
   };
 }
 
 function usageFromToolActivity(activities: ToolActivity[] | undefined): TurnUsage | undefined {
   let fallbackIndex = 0;
-  const requests = (activities ?? [])
-    .map((activity) => {
-      if (asString(activity.tool) !== "llm_inference" || asString(activity.event) !== "tool_finished") {
-        return null;
-      }
+  const requestsByIndex = new Map<number, TurnUsageRequest>();
 
-      fallbackIndex += 1;
-      return usageRequestFromActivity(activity, fallbackIndex);
-    })
-    .filter((request): request is TurnUsageRequest => request !== null)
-    .sort((left, right) => left.requestIndex - right.requestIndex);
+  (activities ?? []).forEach((activity) => {
+    if (asString(activity.tool) !== "llm_inference") {
+      return;
+    }
+
+    fallbackIndex += 1;
+    const request = usageRequestFromActivity(activity, fallbackIndex);
+    if (!request) {
+      return;
+    }
+
+    const existing = requestsByIndex.get(request.requestIndex);
+    if (!existing) {
+      requestsByIndex.set(request.requestIndex, request);
+      return;
+    }
+
+    requestsByIndex.set(request.requestIndex, {
+      requestIndex: request.requestIndex,
+      phase: request.phase || existing.phase,
+      provider: request.provider || existing.provider,
+      providerDisplayName: request.providerDisplayName || existing.providerDisplayName,
+      model: request.model || existing.model,
+      inputChars: request.inputChars > 0 ? request.inputChars : existing.inputChars,
+      outputChars: request.outputChars > 0 ? request.outputChars : existing.outputChars,
+      estimatedInputTokens:
+        request.estimatedInputTokens > 0 ? request.estimatedInputTokens : existing.estimatedInputTokens,
+      estimatedOutputTokens:
+        request.estimatedOutputTokens > 0 ? request.estimatedOutputTokens : existing.estimatedOutputTokens,
+      estimatedTotalTokens:
+        request.estimatedTotalTokens > 0
+          ? request.estimatedTotalTokens
+          : existing.estimatedTotalTokens > 0
+            ? existing.estimatedTotalTokens
+            : Math.max(
+              0,
+              (request.estimatedInputTokens > 0 ? request.estimatedInputTokens : existing.estimatedInputTokens)
+              + (request.estimatedOutputTokens > 0 ? request.estimatedOutputTokens : existing.estimatedOutputTokens),
+            ),
+    });
+  });
+
+  const requests = [...requestsByIndex.values()].sort((left, right) => left.requestIndex - right.requestIndex);
 
   if (requests.length === 0) {
     return undefined;
@@ -465,6 +534,7 @@ export function ChatPanel() {
     retryMessage,
     cancelRequest,
     clearChat,
+    compactCurrentChat,
     createNewChat,
     selectChat,
     deleteChat,
@@ -609,6 +679,15 @@ export function ChatPanel() {
                   title="Clear the current thread"
                 >
                   <RotateCcw size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="action-button"
+                  onClick={() => compactCurrentChat()}
+                  title="Compact older turns into a system summary"
+                  disabled={state.isSending || currentMessages.length < 8}
+                >
+                  Compact
                 </button>
                 <button
                   type="button"
@@ -830,7 +909,7 @@ export function ChatPanel() {
                       ) : null}
 
                       {inferenceSteps.length > 0 ? (
-                        <div className={cn("space-y-2", usage?.requests.length ? "border-t border-docpilot-border pt-3" : "") }>
+                        <div className={cn("space-y-2", usage?.requests.length ? "border-t border-docpilot-border pt-3" : "")}>
                           {inferenceSteps.map((step) => (
                             <div key={step.key} className="flex items-start gap-2">
                               <span
@@ -855,7 +934,7 @@ export function ChatPanel() {
                       ) : null}
 
                       {noticeTexts.length > 0 ? (
-                        <div className={cn("space-y-2", inferenceSteps.length > 0 || usage?.requests.length ? "border-t border-docpilot-border pt-3" : "") }>
+                        <div className={cn("space-y-2", inferenceSteps.length > 0 || usage?.requests.length ? "border-t border-docpilot-border pt-3" : "")}>
                           {noticeTexts.map((text, index) => (
                             <div
                               key={`${message.id}-notice-${index}`}

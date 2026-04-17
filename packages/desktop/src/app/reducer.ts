@@ -31,6 +31,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   requestTimeoutMs: 30_000,
   streaming: true,
   connectOnStartup: false,
+  agentConfig: {
+    maxInputTokens: 6_000,
+    sessionContextBudgetTokens: 4_200,
+    toolResultBudgetTokens: 2_200,
+    maxToolBatchSize: 4,
+    maxParallelTools: 3,
+    maxHeavyToolsPerTurn: 1,
+    autoCompactSession: true,
+  },
   mode: "agent",
   theme: DEFAULT_THEME,
 };
@@ -44,6 +53,7 @@ const DEFAULT_CONNECTION: ConnectionState = {
 
 export function createInitialState(persisted: Partial<PersistedState>): AppState {
   const persistedTheme = persisted.settings?.theme;
+  const persistedAgentConfig = persisted.settings?.agentConfig;
 
   return {
     documents: persisted.documents ?? [],
@@ -54,6 +64,10 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
     settings: {
       ...DEFAULT_SETTINGS,
       ...persisted.settings,
+      agentConfig: {
+        ...DEFAULT_SETTINGS.agentConfig,
+        ...(persistedAgentConfig ?? {}),
+      },
       // apiBaseUrl is bundled with the desktop build and must not be user-configurable.
       apiBaseUrl: DEFAULT_SETTINGS.apiBaseUrl,
       theme: persistedTheme && isThemeMode(persistedTheme) ? persistedTheme : DEFAULT_SETTINGS.theme,

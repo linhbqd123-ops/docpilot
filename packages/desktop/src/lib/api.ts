@@ -753,6 +753,15 @@ export async function sendAgentTurnToBackend(args: {
       activePane: "editor",
       visibleBlockIds,
     },
+    agentConfig: {
+      maxInputTokens: settings.agentConfig.maxInputTokens,
+      sessionContextBudgetTokens: settings.agentConfig.sessionContextBudgetTokens,
+      toolResultBudgetTokens: settings.agentConfig.toolResultBudgetTokens,
+      maxToolBatchSize: settings.agentConfig.maxToolBatchSize,
+      maxParallelTools: settings.agentConfig.maxParallelTools,
+      maxHeavyToolsPerTurn: settings.agentConfig.maxHeavyToolsPerTurn,
+      autoCompactSession: settings.agentConfig.autoCompactSession,
+    },
     history: history.map((message) => ({
       role: message.role === "error" ? "assistant" : message.role,
       content: message.content,

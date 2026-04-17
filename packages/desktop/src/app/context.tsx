@@ -65,6 +65,7 @@ interface AppContextValue {
   exportDocument: () => Promise<void>;
   clearBanner: () => void;
   clearChat: () => void;
+  compactCurrentChat: () => void;
   createNewChat: () => void;
   selectChat: (chatId: string | null) => void;
   deleteChat: (chatId: string) => void;
@@ -107,6 +108,60 @@ function estimateInputChars(history: ChatMessage[]) {
 
 function estimateInputTokens(history: ChatMessage[]) {
   return history.reduce((total, message) => total + estimateTokenCount(message.content), 0);
+}
+
+function compactMessageText(text: string, maxChars: number) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 16)).trimEnd()} ...[truncated]`;
+}
+
+function compactChatMessages(messages: ChatMessage[]) {
+  const preserveTail = 6;
+  const summaryMaxChars = 1_600;
+
+  if (messages.length <= preserveTail + 2) {
+    return messages;
+  }
+
+  let leadingSystemCount = 0;
+  while (leadingSystemCount < messages.length && messages[leadingSystemCount].role === "system") {
+    leadingSystemCount += 1;
+  }
+
+  const tailStart = Math.max(leadingSystemCount, messages.length - preserveTail);
+  const middle = messages.slice(leadingSystemCount, tailStart);
+  if (middle.length < 2) {
+    return messages;
+  }
+
+  const preservedPrefix = messages
+    .slice(0, leadingSystemCount)
+    .filter((message) => !message.content.startsWith("Compacted chat history:"));
+  const preservedTail = messages.slice(tailStart);
+  const perMessageChars = Math.max(96, Math.floor(summaryMaxChars / Math.max(1, middle.length)));
+  const lines = middle
+    .map((message) => `- ${message.role}: ${compactMessageText(message.content, perMessageChars)}`)
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return messages;
+  }
+
+  const summaryMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: "system",
+    content: ["Compacted chat history:", ...lines].join("\n"),
+    createdAt: Date.now(),
+    status: "sent",
+  };
+
+  return [...preservedPrefix, summaryMessage, ...preservedTail];
 }
 
 function resolveProviderTelemetry(settings: AppSettings) {
@@ -1290,6 +1345,28 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }
 
+  function compactCurrentChat() {
+    if (!selectedChat) {
+      return;
+    }
+
+    const compactedMessages = compactChatMessages(currentMessages);
+    if (compactedMessages === currentMessages || compactedMessages.length === currentMessages.length) {
+      dispatch({ type: "setBanner", payload: "This chat is already compact enough." });
+      return;
+    }
+
+    const compactedChat: Chat = {
+      ...selectedChat,
+      messages: compactedMessages,
+      updatedAt: Date.now(),
+    };
+
+    dispatch({ type: "createChat", payload: { chat: compactedChat } });
+    dispatch({ type: "setBanner", payload: "Older turns were compacted into a system summary for this chat." });
+    void syncChatSnapshot(compactedChat, "Failed to sync compacted chat to backend:");
+  }
+
   function createNewChat() {
     if (!selectedDocument) {
       return;
@@ -1362,6 +1439,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         exportDocument,
         clearBanner,
         clearChat,
+        compactCurrentChat,
         createNewChat,
         selectChat,
         deleteChat,

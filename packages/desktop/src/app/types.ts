@@ -155,6 +155,16 @@ export interface Chat {
   updatedAt: number;
 }
 
+export interface AgentExecutionSettings {
+  maxInputTokens: number;
+  sessionContextBudgetTokens: number;
+  toolResultBudgetTokens: number;
+  maxToolBatchSize: number;
+  maxParallelTools: number;
+  maxHeavyToolsPerTurn: number;
+  autoCompactSession: boolean;
+}
+
 export interface AppSettings {
   apiBaseUrl: string;
   provider: "ollama" | "openai" | "groq" | "openrouter" | "together" | "nvidia" | "zai" | "anthropic" | "azure" | "custom";
@@ -164,6 +174,7 @@ export interface AppSettings {
   requestTimeoutMs: number;
   streaming: boolean;
   connectOnStartup: boolean;
+  agentConfig: AgentExecutionSettings;
   /** Chat mode: 'agent' uses document-aware agent flows; 'ask' uses a simple Q&A mode. */
   mode: ChatMode;
   theme: ThemeMode;

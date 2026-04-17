@@ -127,7 +127,10 @@ Notes:
 - `tool_started` / `tool_finished` can represent both document-engine steps and model phases. The backend now emits `llm_inference` with phases such as `compose_answer` and `plan_revision` so the UI can render Copilot-style inference progress.
 - Ask turns stream provider output token by token through `assistant_delta` instead of waiting for a full non-streaming response.
 - If `answer_about_document` returns no useful snippets, the backend falls back to compact analysis HTML derived from the imported DOCX and emits `get_analysis_html` activity before composing the answer.
-- Edit turns first run a deterministic target-resolution pass. When the raw prompt search misses, the orchestrator extracts source/section hints such as quoted text or `replace X in Y with Z`, calls `locate_relevant_context` for those hints, and loads nearby block windows before asking the model to plan patch operations.
+- Agent turns now use an adaptive tool loop with a normalized multi-tool batch contract. The model can emit `call_tools` with `execution: "parallel" | "sequential"`, and the backend validates batch size, per-tool usage limits, heavy-tool limits, and approximate token budgets before executing it.
+- Tools are classified by cost tier. Light tools may run in parallel when independent, while medium and heavy tools are forced through sequential planning. Heavy tools such as `get_source_html` and `get_analysis_html` are intentionally capped per turn.
+- Approximate input-token budgeting is enforced per request. When a turn is close to the configured session window or exceeds the hard input cap, the backend automatically compacts older chat history and older tool results before the next LLM request.
+- Source HTML is no longer prefetched for every agent turn. The backend only fetches it when the model explicitly asks for higher-fidelity document structure during the loop.
 
 ## Environment variables
 
@@ -138,9 +141,18 @@ See `.env.example` for all options. Key ones:
 | `DOC_MCP_URL` | `http://localhost:8080` | Java doc-mcp service URL |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Model to use |
+| `AGENT_MAX_INPUT_TOKENS` | `6000` | Approximate hard cap for assembled input tokens per LLM request |
+| `AGENT_SESSION_CONTEXT_BUDGET_TOKENS` | `4200` | Soft budget for chat history and loop transcript before compaction |
+| `AGENT_TOOL_RESULT_BUDGET_TOKENS` | `2200` | Approximate per-batch allowance for tool results injected back into the prompt |
+| `AGENT_MAX_TOOL_BATCH_SIZE` | `4` | Maximum number of tools the model may request in one batch |
+| `AGENT_MAX_PARALLEL_TOOLS` | `3` | Maximum number of parallel light tools allowed in a batch |
+| `AGENT_MAX_HEAVY_TOOLS_PER_TURN` | `1` | Maximum heavy-tool calls allowed across a single agent turn |
+| `AGENT_AUTO_COMPACT_SESSION` | `true` | Enables proactive session-history compaction near the input budget |
 | `OPENAI_API_KEY` | *(empty)* | Required for OpenAI provider |
 | `NVIDIA_API_KEY` | *(empty)* | Required for NVIDIA provider |
 | `ANTHROPIC_API_KEY` | *(empty)* | Required for Anthropic provider |
+
+The desktop client may also override these values per request through `agentConfig` in `/api/agent/turn` and `/api/agent/turn/stream`.
 
 ## Debug traces
 
