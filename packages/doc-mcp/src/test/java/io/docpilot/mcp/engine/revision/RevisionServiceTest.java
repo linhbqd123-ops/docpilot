@@ -440,7 +440,7 @@ class RevisionServiceTest {
             revisionStore,
             sessionStore,
             semanticSearchService,
-            new FidelityHtmlService(),
+            new FidelityHtmlService(new io.docpilot.mcp.engine.line.LineExtractorService()),
             new AnalysisHtmlConverter(),
             objectMapper
         );

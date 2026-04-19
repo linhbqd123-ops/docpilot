@@ -191,6 +191,9 @@ class DocMcpClient:
             expected="text",
         )
 
+    async def get_document_lines(self, session_id: str) -> dict[str, Any]:
+        return await self.call_tool("get_document_lines", {"session_id": session_id})
+
     async def list_session_revisions(
         self,
         session_id: str,

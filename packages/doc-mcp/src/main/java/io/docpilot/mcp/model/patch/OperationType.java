@@ -34,5 +34,20 @@ public enum OperationType {
 
     // ── List ──
     CHANGE_LIST_TYPE,
-    CHANGE_LIST_LEVEL
+    CHANGE_LIST_LEVEL,
+
+    // ── Line-based (simplified AI operations) ───────────────────────────────
+    /**
+     * Replace the text content of a single block element (identified by line_number),
+     * keeping its outer HTML wrapper, class, and style attributes intact.
+     * value: {line_number, old_text, new_text}
+     */
+    REPLACE_TEXT_LINE,
+
+    /**
+     * Replace an entire block element (identified by line_number) with
+     * AI-provided HTML markup.
+     * value: {line_number, html}
+     */
+    REPLACE_BLOCK_LINE
 }

@@ -53,7 +53,7 @@ def build_agent_system_prompt(
         "    \"tool_calls\": [\n"
         "        {\n"
         "            \"id\": \"step_1\",\n"
-        "            \"tool_name\": \"get_session_summary\" | \"answer_about_document\" | \"inspect_document\" | \"locate_relevant_context\" | \"get_context_window\" | \"get_source_html\" | \"get_analysis_html\",\n"
+        "            \"tool_name\": \"get_session_summary\" | \"answer_about_document\" | \"inspect_document\" | \"locate_relevant_context\" | \"get_context_window\" | \"get_source_html\" | \"get_analysis_html\" | \"get_document_lines\",\n"
         "            \"arguments\": {},\n"
         "            \"reason\": \"string\"\n"
         "        }\n"
@@ -65,7 +65,7 @@ def build_agent_system_prompt(
         "Backward-compatible single-tool schema:\n"
         "{\n"
         "    \"action\": \"call_tool\",\n"
-        "    \"tool_name\": \"get_session_summary\" | \"answer_about_document\" | \"inspect_document\" | \"locate_relevant_context\" | \"get_context_window\" | \"get_source_html\" | \"get_analysis_html\",\n"
+        "    \"tool_name\": \"get_session_summary\" | \"answer_about_document\" | \"inspect_document\" | \"locate_relevant_context\" | \"get_context_window\" | \"get_source_html\" | \"get_analysis_html\" | \"get_document_lines\",\n"
         "    \"arguments\": {}\n"
         "}\n\n"
     )
@@ -79,9 +79,10 @@ def build_agent_system_prompt(
         "    \"summary\": \"short revision summary\",\n"
         "    \"operations\": [\n"
         "        {\n"
-        "            \"op\": \"REPLACE_TEXT_RANGE\" | \"INSERT_TEXT_AT\" | \"DELETE_TEXT_RANGE\" | \"APPLY_STYLE\" | \"APPLY_INLINE_FORMAT\" | \"SET_HEADING_LEVEL\" | \"CREATE_BLOCK\" | \"UPDATE_CELL_CONTENT\" | \"CHANGE_LIST_TYPE\" | \"CHANGE_LIST_LEVEL\",\n"
+        "            \"op\": \"REPLACE_TEXT_RANGE\" | \"INSERT_TEXT_AT\" | \"DELETE_TEXT_RANGE\" | \"APPLY_STYLE\" | \"APPLY_INLINE_FORMAT\" | \"SET_HEADING_LEVEL\" | \"CREATE_BLOCK\" | \"UPDATE_CELL_CONTENT\" | \"CHANGE_LIST_TYPE\" | \"CHANGE_LIST_LEVEL\" | \"REPLACE_TEXT_LINE\" | \"REPLACE_BLOCK_LINE\",\n"
         "            \"target\": {\n"
-        "                \"block_id\": \"string\",\n"
+        "                \"block_id\": \"string (for REPLACE_TEXT_RANGE and legacy ops)\",\n"
+        "                \"line_number\": 5,\n"
         "                \"start\": 0,\n"
         "                \"end\": 10,\n"
         "                \"table_id\": \"string\",\n"
@@ -106,7 +107,8 @@ def build_agent_system_prompt(
         "- locate_relevant_context: {\"query\": \"string\"}\n"
         "- get_context_window: {\"block_id\": \"string\", \"window_size\": 2}\n"
         "- get_source_html: {}\n"
-        "- get_analysis_html: {}\n\n"
+        "- get_analysis_html: {}\n"
+        "- get_document_lines: {} — returns [{line_number, text, tag}]; use line_number in REPLACE_TEXT_LINE/REPLACE_BLOCK_LINE target\n\n"
     )
 
     parts.append("Execution budget and control:\n")
@@ -140,9 +142,22 @@ def build_agent_system_prompt(
         "- The executor may compact older session history and tool results automatically to stay under the input budget.\n"
     )
     parts.append(
-        "- For edits, gather explicit block ids or table or cell ids from tool results before propose_edit.\n"
+        "- For edit requests, gather explicit block ids or table or cell ids from tool results before propose_edit.\n"
     )
     parts.append("- Never invent block ids, table ids, row ids, or cell ids.\n")
+    parts.append(
+        "- For simple text replacements (changing wording of a paragraph, heading, list item), prefer REPLACE_TEXT_LINE: "
+        "call get_document_lines first to get line_number values, then use target.line_number + value.old_text + value.new_text.\n"
+    )
+    parts.append(
+        "- REPLACE_TEXT_LINE keeps the outer HTML structure (tag, class, style) and only replaces the text content.\n"
+    )
+    parts.append(
+        "- For block replacements that change structure or inline formatting, use REPLACE_BLOCK_LINE with target.line_number and value.html (the complete new HTML element).\n"
+    )
+    parts.append(
+        "- REPLACE_TEXT_LINE and REPLACE_BLOCK_LINE require target.line_number (integer from get_document_lines result). Do not invent line numbers.\n"
+    )
     parts.append("- Use result_type=\"clarify\" when the request is ambiguous or unsafe to execute.\n")
     parts.append("- Use result_type=\"answer\" when no document mutation is required.\n")
     parts.append(
@@ -165,6 +180,8 @@ def build_agent_system_prompt(
     parts.append("- Every REPLACE_TEXT_RANGE, INSERT_TEXT_AT, DELETE_TEXT_RANGE, and UPDATE_CELL_CONTENT operation MUST include target.block_id. Operations without block_id will be rejected.\n")
     parts.append("- Prefer renderable paragraph, table, row, or cell block ids from tool output. Avoid TEXT_RUN-only ids when a parent block id can express the same edit for review.\n")
     parts.append("- For REPLACE_TEXT_RANGE and UPDATE_CELL_CONTENT, put the replacement text in value.text.\n")
+    parts.append("- For REPLACE_TEXT_LINE, put the original text in value.old_text and the replacement in value.new_text.\n")
+    parts.append("- For REPLACE_BLOCK_LINE, put the complete new block HTML in value.html.\n")
     parts.append("- For APPLY_STYLE, use value.style_id.\n")
     parts.append("- For SET_HEADING_LEVEL or CHANGE_LIST_LEVEL, use value.level.\n")
     parts.append("- For CREATE_BLOCK, use value.type and value.text at minimum.\n")

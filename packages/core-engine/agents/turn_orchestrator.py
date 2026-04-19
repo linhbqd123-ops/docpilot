@@ -97,6 +97,13 @@ _AGENT_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "estimated_result_tokens": 1200,
         "guidance": "Use when compact analysis HTML is sufficient and cheaper tools were not enough.",
     },
+    "get_document_lines": {
+        "tier": "medium",
+        "supports_parallel": True,
+        "max_calls_per_turn": 2,
+        "estimated_result_tokens": 800,
+        "guidance": "Get the document as numbered lines (one block element per line). Use line_number from results as the target for REPLACE_TEXT_LINE or REPLACE_BLOCK_LINE operations.",
+    },
 }
 _AGENT_TOOL_NAMES = set(_AGENT_TOOL_SPECS)
 _AGENT_STRUCTURED_OUTPUT_MODE = "native_structured"
@@ -129,6 +136,7 @@ _AGENT_RESPONSE_FORMAT: dict[str, Any] = {
                         "get_context_window",
                         "get_source_html",
                         "get_analysis_html",
+                        "get_document_lines",
                     ],
                 },
                 "arguments": {
@@ -152,6 +160,7 @@ _AGENT_RESPONSE_FORMAT: dict[str, Any] = {
                                     "get_context_window",
                                     "get_source_html",
                                     "get_analysis_html",
+                                    "get_document_lines",
                                 ],
                             },
                             "arguments": {
@@ -188,6 +197,8 @@ _AGENT_RESPONSE_FORMAT: dict[str, Any] = {
                                     "UPDATE_CELL_CONTENT",
                                     "CHANGE_LIST_TYPE",
                                     "CHANGE_LIST_LEVEL",
+                                    "REPLACE_TEXT_LINE",
+                                    "REPLACE_BLOCK_LINE",
                                 ],
                             },
                             "target": {
@@ -390,6 +401,18 @@ def _compact_tool_result(tool_name: str, result: Any) -> Any:
 
     if tool_name == "get_session_summary":
         return result
+
+    if tool_name == "get_document_lines" and isinstance(result, dict):
+        compact: dict[str, Any] = {
+            key: result.get(key)
+            for key in ("session_id", "filename", "total_lines")
+            if key in result
+        }
+        lines = result.get("lines")
+        if isinstance(lines, list):
+            # Return all lines — the AI needs them to know line numbers for targeting.
+            compact["lines"] = lines
+        return compact
 
     if tool_name == "inspect_document" and isinstance(result, dict):
         compact = {
@@ -1188,13 +1211,14 @@ def _collect_match_block_ids(context: Any) -> list[str]:
     return block_ids
 
 
-_TARGET_REFERENCE_KEYS = {"block_id", "table_id", "row_id", "cell_id", "cell_logical_address"}
+_TARGET_REFERENCE_KEYS = {"block_id", "table_id", "row_id", "cell_id", "cell_logical_address", "line_number"}
 _TARGET_REFERENCE_KEYS_WITH_ALIASES = _TARGET_REFERENCE_KEYS | {
     "blockId",
     "tableId",
     "rowId",
     "cellId",
     "cellLogicalAddress",
+    "lineNumber",
 }
 
 
@@ -1926,6 +1950,20 @@ async def _execute_agent_tool_call(
             )
         )
         return events, analysis_html
+
+    if normalized_tool_name == "get_document_lines":
+        events = [_tool_started("get_document_lines", **event_payload)]
+        doc_lines = await client.get_document_lines(document_session_id)
+        doc_lines = doc_lines if isinstance(doc_lines, dict) else {"result": doc_lines}
+        total_lines = doc_lines.get("total_lines", 0)
+        events.append(
+            _tool_finished(
+                "get_document_lines",
+                **event_payload,
+                totalLines=total_lines,
+            )
+        )
+        return events, doc_lines
 
     return [], {"error": f"Unhandled tool `{normalized_tool_name}`."}
 

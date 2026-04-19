@@ -70,13 +70,13 @@ export function InlineReviewBar({
                 "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition",
                 focusedIsRejected
                   ? "text-docpilot-muted hover:bg-docpilot-hover hover:text-docpilot-text"
-                  : "bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30",
+                  : "bg-emerald-600/20 bg-docpilot-accent text-docpilot-accentContrast hover:bg-docpilot-accentHover",
               )}
               onClick={() => onAcceptChange(focusedChange.id)}
               title="Accept this change"
             >
               <Check size={13} />
-              {focusedIsRejected ? "Keep" : "Accepted"}
+              {focusedIsRejected ? "Keep" : "Accept"}
             </button>
 
             <button

@@ -6,12 +6,15 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.docpilot.mcp.engine.anchor.AnchorService;
 import io.docpilot.mcp.engine.diff.DiffService;
+import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
+import io.docpilot.mcp.engine.line.LineExtractorService;
 import io.docpilot.mcp.engine.patch.PatchEngine;
 import io.docpilot.mcp.engine.projection.HtmlProjectionService;
 import io.docpilot.mcp.engine.revision.RevisionService;
 import io.docpilot.mcp.mcp.ToolDefinition;
 import io.docpilot.mcp.model.document.ComponentType;
 import io.docpilot.mcp.model.document.DocumentComponent;
+import io.docpilot.mcp.model.document.DocumentLine;
 import io.docpilot.mcp.model.document.LayoutProps;
 import io.docpilot.mcp.model.document.StyleRef;
 import io.docpilot.mcp.model.legacy.StyleEntry;
@@ -64,6 +67,7 @@ public class AiFacingToolHandler {
     private final SemanticSearchService semanticSearchService;
     private final AnchorService anchorService;
     private final RegistryStore registryStore;
+    private final LineExtractorService lineExtractorService;
 
     public List<ToolDefinition> definitions() {
         return List.of(
@@ -74,6 +78,7 @@ public class AiFacingToolHandler {
             getStyleContext(),
             searchText(),
             searchTextWithHtml(),
+            getDocumentLines(),
             proposeDocumentEdit(),
             applyDocumentEdit(),
             reviewPendingRevision(),
@@ -827,6 +832,54 @@ public class AiFacingToolHandler {
             parentId = parent.getParentId();
         }
         return false;
+    }
+
+    // ─── get_document_lines ───────────────────────────────────────────────────
+
+    private ToolDefinition getDocumentLines() {
+        ObjectNode schema = objectMapper.createObjectNode();
+        schema.put("type", "object");
+        ObjectNode props = schema.putObject("properties");
+        props.putObject("session_id").put("type", "string");
+        schema.putArray("required").add("session_id");
+
+        return new ToolDefinition(
+            "get_document_lines",
+            "Returns the document as a numbered list of lines, where each line is one block-level HTML element "
+                + "(paragraph, heading, list item, table cell, etc.). Line numbers are 1-based and stable within "
+                + "the current document state. Use the returned line numbers with REPLACE_TEXT_LINE or "
+                + "REPLACE_BLOCK_LINE operations to target edits precisely without needing block IDs.",
+            schema,
+            params -> {
+                DocumentSession s = requireSession(params);
+                String sourceHtml = sessionStore
+                    .findTextAsset(s.getSessionId(), FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+                    .orElseThrow(() -> new IllegalStateException(
+                        "No source HTML found for session " + s.getSessionId()));
+
+                org.jsoup.nodes.Document doc = org.jsoup.Jsoup.parse(sourceHtml);
+                List<DocumentLine> lines = lineExtractorService.extractLines(doc);
+
+                ObjectNode out = objectMapper.createObjectNode();
+                out.put("session_id", s.getSessionId());
+                out.put("filename", s.getFilename());
+                out.put("total_lines", lines.size());
+
+                com.fasterxml.jackson.databind.node.ArrayNode linesArray = out.putArray("lines");
+                for (DocumentLine line : lines) {
+                    ObjectNode entry = objectMapper.createObjectNode();
+                    entry.put("line_number", line.getLineNumber());
+                    entry.put("text", line.getText());
+                    entry.put("tag", line.getTag());
+                    if (line.getBlockId() != null && !line.getBlockId().isBlank()) {
+                        entry.put("block_id", line.getBlockId());
+                    }
+                    linesArray.add(entry);
+                }
+                return out;
+            },
+            "L3", true
+        );
     }
 
     // ─── propose_document_edit ────────────────────────────────────────────────

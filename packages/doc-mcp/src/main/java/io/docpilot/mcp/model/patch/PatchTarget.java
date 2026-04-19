@@ -31,4 +31,12 @@ public class PatchTarget {
     String cellId;
     /** Logical address, e.g. "R3C2" (1-based). Used as fallback when cellId fails. */
     String cellLogicalAddress;
+
+    /**
+     * 1-based line number for line-based operations (REPLACE_TEXT_LINE, REPLACE_BLOCK_LINE).
+     * When set, the operation targets the block-level HTML element at this position
+     * in the extracted line sequence rather than by blockId.
+     */
+    @com.fasterxml.jackson.annotation.JsonProperty("line_number")
+    Integer lineNumber;
 }

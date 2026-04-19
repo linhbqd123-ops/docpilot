@@ -1,5 +1,7 @@
 package io.docpilot.mcp.engine.fidelity;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import io.docpilot.mcp.engine.line.LineExtractorService;
 import io.docpilot.mcp.model.document.ComponentType;
 import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.patch.OperationType;
@@ -7,6 +9,7 @@ import io.docpilot.mcp.model.patch.Patch;
 import io.docpilot.mcp.model.patch.PatchOperation;
 import io.docpilot.mcp.model.patch.PatchTarget;
 import io.docpilot.mcp.model.session.DocumentSession;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -23,8 +26,11 @@ import java.util.Locale;
 import java.util.Set;
 
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class FidelityHtmlService {
+
+    private final LineExtractorService lineExtractorService;
 
     public static final String CURRENT_SOURCE_ASSET_NAME = "source.html";
     public static final String ORIGINAL_SOURCE_ASSET_NAME = "source.original.html";
@@ -103,6 +109,8 @@ public class FidelityHtmlService {
             case CREATE_BLOCK -> createBlock(document, operation);
             case INSERT_ROW -> insertRow(document, operation.getTarget());
             case DELETE_ROW -> deleteRow(document, operation.getTarget());
+            case REPLACE_TEXT_LINE -> applyReplaceTextLine(document, operation);
+            case REPLACE_BLOCK_LINE -> applyReplaceBlockLine(document, operation);
             default -> {
                 // For style-only operations we keep the existing HTML untouched to preserve source fidelity.
             }
@@ -242,6 +250,69 @@ public class FidelityHtmlService {
             row.remove();
         }
     }
+
+    // ── Line-based operations ─────────────────────────────────────────────────
+
+    /**
+     * Replaces the text content of the block element at the given line number,
+     * preserving the outer HTML wrapper (tag, class, inline style, data attributes).
+     * value: {old_text, new_text}
+     */
+    private void applyReplaceTextLine(Document document, PatchOperation operation) {
+        Integer lineNumber = operation.getTarget() != null ? operation.getTarget().getLineNumber() : null;
+        JsonNode value = operation.getValue();
+        String newText = value != null ? value.path("new_text").asText(null) : null;
+        if (lineNumber == null || lineNumber < 1 || newText == null) {
+            log.warn("REPLACE_TEXT_LINE: missing or invalid target.line_number/value.new_text");
+            return;
+        }
+
+        List<Element> blocks = lineExtractorService.getBlockElements(document);
+        if (lineNumber > blocks.size()) {
+            log.warn("REPLACE_TEXT_LINE: line {} out of range (document has {} lines)", lineNumber, blocks.size());
+            return;
+        }
+
+        Element el = blocks.get(lineNumber - 1);
+        el.text(newText);  // Replaces all inner content; keeps tag, class, style, data-* attrs.
+    }
+
+    /**
+     * Replaces the entire block element at the given line number with AI-provided HTML.
+     * The data-doc-node-id attribute from the old element is preserved if present.
+     * value: {html}
+     */
+    private void applyReplaceBlockLine(Document document, PatchOperation operation) {
+        Integer lineNumber = operation.getTarget() != null ? operation.getTarget().getLineNumber() : null;
+        JsonNode value = operation.getValue();
+        String newHtml = value != null ? value.path("html").asText(null) : null;
+        if (lineNumber == null || lineNumber < 1 || newHtml == null || newHtml.isBlank()) {
+            log.warn("REPLACE_BLOCK_LINE: missing or invalid target.line_number/value.html");
+            return;
+        }
+
+        List<Element> blocks = lineExtractorService.getBlockElements(document);
+        if (lineNumber > blocks.size()) {
+            log.warn("REPLACE_BLOCK_LINE: line {} out of range (document has {} lines)", lineNumber, blocks.size());
+            return;
+        }
+
+        Element el = blocks.get(lineNumber - 1);
+        String blockId = el.attr("data-doc-node-id");
+
+        Element newEl = Jsoup.parseBodyFragment(newHtml).body().children().first();
+        if (newEl == null) {
+            log.warn("REPLACE_BLOCK_LINE: provided html produced no block element");
+            return;
+        }
+        // Preserve the docpilot annotation so the component tree reference stays valid.
+        if (!blockId.isBlank()) {
+            newEl.attr("data-doc-node-id", blockId);
+        }
+        el.replaceWith(newEl);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private Element resolveTextTarget(Document document, PatchTarget target) {
         Element targetElement = resolveElement(document, target);

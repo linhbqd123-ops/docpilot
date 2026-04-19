@@ -199,7 +199,6 @@ function syncReviewClasses(root: ParentNode, highlightedBlockIds: string[], focu
 
   highlightedBlockIds.forEach((blockId) => {
     findBlockElements(root, blockId).forEach((element) => {
-      console.log("Highlighting block ID:", blockId, element);
       element.classList.add("docpilot-review-change");
     });
   });

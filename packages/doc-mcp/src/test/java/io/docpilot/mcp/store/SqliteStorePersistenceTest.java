@@ -137,7 +137,7 @@ class SqliteStorePersistenceTest {
                 context.revisionStore,
                 context.sessionStore,
                 new NoOpSemanticSearchService(),
-                new FidelityHtmlService(),
+                new FidelityHtmlService(new io.docpilot.mcp.engine.line.LineExtractorService()),
                 new AnalysisHtmlConverter(),
                 new AppConfig().objectMapper()
             );

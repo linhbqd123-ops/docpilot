@@ -61,6 +61,12 @@ public class PatchEngine {
                 continue;
             }
 
+            // Line-based ops bypass the component tree — validate value structure only.
+            if (isLineBasedOp(op)) {
+                validateLineBasedOp(op, errors, warnings);
+                continue;
+            }
+
             Optional<DocumentComponent> resolved = resolveTarget(target, session, index);
             if (resolved.isEmpty()) {
                 errors.add("Cannot locate target " + describeTarget(target));
@@ -106,6 +112,11 @@ public class PatchEngine {
 
         for (int opIndex = 0; opIndex < patch.getOperations().size(); opIndex++) {
             PatchOperation op = patch.getOperations().get(opIndex);
+
+            // Line-based ops mutate the fidelity HTML via FidelityHtmlService — skip component tree mutation.
+            if (isLineBasedOp(op)) {
+                continue;
+            }
             
             if (op.getTarget() == null) {
                 throw new IllegalStateException("Patch operation " + op.getOp() + " is missing a target.");
@@ -177,6 +188,35 @@ public class PatchEngine {
             default -> log.warn("Unhandled operation type: {}", op.getOp());
         }
     }
+
+    // ── Line-based op helpers ─────────────────────────────────────────────────
+
+    private static boolean isLineBasedOp(PatchOperation op) {
+        return op.getOp() == OperationType.REPLACE_TEXT_LINE
+            || op.getOp() == OperationType.REPLACE_BLOCK_LINE;
+    }
+
+    private void validateLineBasedOp(PatchOperation op, List<String> errors, List<String> warnings) {
+        PatchTarget target = op.getTarget();
+        Integer lineNumber = target != null ? target.getLineNumber() : null;
+        if (lineNumber == null || lineNumber < 1) {
+            errors.add(op.getOp() + ": target.line_number must be an integer >= 1");
+            return;
+        }
+        JsonNode value = op.getValue();
+        if (op.getOp() == OperationType.REPLACE_TEXT_LINE) {
+            if (value == null || !value.has("new_text")) {
+                errors.add("REPLACE_TEXT_LINE: value.new_text is required");
+            }
+        } else if (op.getOp() == OperationType.REPLACE_BLOCK_LINE) {
+            JsonNode htmlNode = value != null ? value.get("html") : null;
+            if (htmlNode == null || htmlNode.asText("").isBlank()) {
+                errors.add("REPLACE_BLOCK_LINE: value.html must be a non-empty HTML string");
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     private void validateOperation(PatchOperation op,
                                    DocumentComponent target,
