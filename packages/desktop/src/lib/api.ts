@@ -5,10 +5,17 @@ import type {
   Chat,
   ChatMode,
   ChatMessage,
+  ChatMessageRevisionLink,
   DocumentRecord,
   ImportedDocumentPayload,
+  PendingRevisionPreview,
+  RevisionDiff,
+  RevisionLayoutDiff,
   RevisionProposal,
   RevisionReview,
+  RevisionStyleDiff,
+  RevisionTextDiff,
+  ReviewOperationTarget,
   RevisionValidation,
   ReviewOperation,
   SessionRefreshPayload,
@@ -109,6 +116,24 @@ function parseValidation(value: unknown): RevisionValidation | undefined {
   };
 }
 
+function parseReviewOperationTarget(value: unknown): ReviewOperationTarget | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return null;
+  }
+
+  return {
+    blockId: asNonEmptyString(record.blockId ?? record.block_id) ?? null,
+    runId: asNonEmptyString(record.runId ?? record.run_id) ?? null,
+    start: typeof record.start === "number" && Number.isFinite(record.start) ? record.start : null,
+    end: typeof record.end === "number" && Number.isFinite(record.end) ? record.end : null,
+    tableId: asNonEmptyString(record.tableId ?? record.table_id) ?? null,
+    rowId: asNonEmptyString(record.rowId ?? record.row_id) ?? null,
+    cellId: asNonEmptyString(record.cellId ?? record.cell_id) ?? null,
+    cellLogicalAddress: asNonEmptyString(record.cellLogicalAddress ?? record.cell_logical_address) ?? null,
+  };
+}
+
 function parseReviewOperation(value: unknown): ReviewOperation | null {
   const record = asRecord(value);
   const op = asNonEmptyString(record.op);
@@ -116,10 +141,139 @@ function parseReviewOperation(value: unknown): ReviewOperation | null {
     return null;
   }
 
+  const target = parseReviewOperationTarget(record.target);
+  const blockId = asNonEmptyString(record.blockId ?? record.block_id) ?? target?.blockId ?? null;
+  const parsedTarget = target ?? (blockId ? { blockId } : null);
+
   return {
     op,
     description: asNonEmptyString(record.description) ?? "",
+    operationIndex: typeof record.operation_index === "number" && Number.isFinite(record.operation_index) ? record.operation_index : null,
+    blockId,
+    target: parsedTarget,
+    value: record.value ?? record.valueText ?? record.value_text ?? null,
+  };
+}
+
+function parseTextDiff(value: unknown): RevisionTextDiff | null {
+  const record = asRecord(value);
+  const changeType = asNonEmptyString(record.changeType ?? record.change_type);
+  if (!changeType) {
+    return null;
+  }
+
+  return {
     blockId: asNonEmptyString(record.blockId ?? record.block_id) ?? null,
+    changeType,
+    oldText: asNonEmptyString(record.oldText ?? record.old_text) ?? null,
+    newText: asNonEmptyString(record.newText ?? record.new_text) ?? null,
+    offset: typeof record.offset === "number" && Number.isFinite(record.offset) ? record.offset : null,
+  };
+}
+
+function parseStyleDiff(value: unknown): RevisionStyleDiff | null {
+  const record = asRecord(value);
+  const property = asNonEmptyString(record.property);
+  if (!property) {
+    return null;
+  }
+
+  return {
+    blockId: asNonEmptyString(record.blockId ?? record.block_id) ?? null,
+    runId: asNonEmptyString(record.runId ?? record.run_id) ?? null,
+    property,
+    oldValue: asNonEmptyString(record.oldValue ?? record.old_value) ?? null,
+    newValue: asNonEmptyString(record.newValue ?? record.new_value) ?? null,
+  };
+}
+
+function parseLayoutDiff(value: unknown): RevisionLayoutDiff | null {
+  const record = asRecord(value);
+  const changeType = asNonEmptyString(record.changeType ?? record.change_type);
+  if (!changeType) {
+    return null;
+  }
+
+  return {
+    blockId: asNonEmptyString(record.blockId ?? record.block_id) ?? null,
+    changeType,
+    oldValue: asNonEmptyString(record.oldValue ?? record.old_value) ?? null,
+    newValue: asNonEmptyString(record.newValue ?? record.new_value) ?? null,
+  };
+}
+
+function parseRevisionDiff(value: unknown): RevisionDiff | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) {
+    return null;
+  }
+
+  const rawTextDiffs = record.textDiffs ?? record.text_diffs;
+  const rawStyleDiffs = record.styleDiffs ?? record.style_diffs;
+  const rawLayoutDiffs = record.layoutDiffs ?? record.layout_diffs;
+  const textDiffs = Array.isArray(rawTextDiffs)
+    ? (rawTextDiffs as unknown[])
+      .map(parseTextDiff)
+      .filter((entry): entry is RevisionTextDiff => entry !== null)
+    : [];
+  const styleDiffs = Array.isArray(rawStyleDiffs)
+    ? (rawStyleDiffs as unknown[])
+      .map(parseStyleDiff)
+      .filter((entry): entry is RevisionStyleDiff => entry !== null)
+    : [];
+  const layoutDiffs = Array.isArray(rawLayoutDiffs)
+    ? (rawLayoutDiffs as unknown[])
+      .map(parseLayoutDiff)
+      .filter((entry): entry is RevisionLayoutDiff => entry !== null)
+    : [];
+
+  return {
+    baseRevisionId: asNonEmptyString(record.baseRevisionId ?? record.base_revision_id) ?? null,
+    targetRevisionId: asNonEmptyString(record.targetRevisionId ?? record.target_revision_id) ?? null,
+    textEditCount: asNumber(record.textEditCount ?? record.text_edit_count, textDiffs.length),
+    styleEditCount: asNumber(record.styleEditCount ?? record.style_edit_count, styleDiffs.length),
+    layoutEditCount: asNumber(record.layoutEditCount ?? record.layout_edit_count, layoutDiffs.length),
+    hasConflicts: Boolean(record.hasConflicts ?? record.has_conflicts),
+    textDiffs,
+    styleDiffs,
+    layoutDiffs,
+  };
+}
+
+function parsePendingRevisionPreview(value: unknown): PendingRevisionPreview | null {
+  const record = asRecord(value);
+  const revisionId = asNonEmptyString(record.revisionId ?? record.revision_id);
+  if (!revisionId) {
+    return null;
+  }
+
+  return {
+    revisionId,
+    documentSessionId: asNonEmptyString(record.documentSessionId ?? record.document_session_id ?? record.sessionId ?? record.session_id) ?? null,
+    baseRevisionId: asNonEmptyString(record.baseRevisionId ?? record.base_revision_id) ?? null,
+    currentRevisionId: asNonEmptyString(record.currentRevisionId ?? record.current_revision_id) ?? null,
+    available: Boolean(record.available),
+    message: asNonEmptyString(record.message) ?? null,
+    html: asNonEmptyString(record.html) ?? null,
+    sourceHtml: asNonEmptyString(record.sourceHtml ?? record.source_html) ?? null,
+    validation: parseValidation(record.validation),
+    diff: parseRevisionDiff(record.diff),
+  };
+}
+
+function parseChatMessageRevisionLink(value: unknown): ChatMessageRevisionLink | null {
+  const record = asRecord(value);
+  const revisionId = asNonEmptyString(record.revisionId ?? record.revision_id);
+  if (!revisionId) {
+    return null;
+  }
+
+  return {
+    revisionId,
+    documentSessionId: asNonEmptyString(record.documentSessionId ?? record.document_session_id) ?? null,
+    baseRevisionId: asNonEmptyString(record.baseRevisionId ?? record.base_revision_id) ?? null,
+    summary: asNonEmptyString(record.summary) ?? null,
+    status: asNonEmptyString(record.status) ?? null,
   };
 }
 
@@ -144,7 +298,9 @@ function parseReview(value: unknown): RevisionReview | null {
     scope: asNonEmptyString(record.scope) ?? "minor",
     createdAt: asNonEmptyString(record.createdAt ?? record.created_at) ?? null,
     operationCount: asNumber(record.operationCount ?? record.operation_count, operations.length),
+    affectedBlockIds: asStringArray(record.affectedBlockIds ?? record.affected_block_ids),
     validation: parseValidation(record.validation),
+    preview: parsePendingRevisionPreview(record.preview),
     operations,
   };
 }
@@ -247,6 +403,7 @@ function parseTurnUsageRequest(value: unknown): TurnUsageRequest | null {
   return {
     requestIndex,
     phase: asNonEmptyString(record.phase) ?? null,
+    requestPurpose: asNonEmptyString(record.requestPurpose ?? record.request_purpose) ?? null,
     provider: asNonEmptyString(record.provider),
     providerDisplayName: asNonEmptyString(record.providerDisplayName ?? record.provider_display_name),
     model: asNonEmptyString(record.model) ?? null,
@@ -310,6 +467,7 @@ function parseChatMessage(value: unknown): ChatMessage | null {
         .filter((entry: ToolActivity | null): entry is ToolActivity => entry !== null)
       : [],
     notices: Array.isArray(record.notices) ? record.notices.map(parseNotice) : [],
+    linkedRevision: parseChatMessageRevisionLink(record.linkedRevision ?? record.linked_revision),
   };
 }
 
@@ -378,25 +536,34 @@ function parseAgentTurnResponse(value: unknown): AgentTurnResponse {
       .filter((entry: ToolActivity | null): entry is ToolActivity => entry !== null)
     : [];
   const notices = Array.isArray(record.notices) ? record.notices.map(parseNotice) : [];
+  const rawResultType = record.resultType ?? record.result_type;
+  const proposalPending = !proposal || proposal.status.toUpperCase() === "PENDING";
+  const reviewPending = !review || review.status.toUpperCase() === "PENDING";
+  const resultType =
+    (rawResultType === "revision_staged" && proposalPending && reviewPending)
+      ? "revision_staged"
+      : rawResultType === "clarify"
+        ? "clarify"
+        : "answer";
+  const revisionId =
+    resultType === "revision_staged"
+      ? (
+          asNonEmptyString(record.revisionId ?? record.revision_id) ??
+          proposal?.revisionId ??
+          review?.revisionId ??
+          null
+        )
+      : null;
 
   return {
     chatId: asNonEmptyString(record.chatId ?? record.chat_id),
     message: asNonEmptyString(record.message) ?? "",
     mode: asChatMode(record.mode) ?? "agent",
     intent: asNonEmptyString(record.intent) ?? null,
-    resultType:
-      record.resultType === "revision_staged" || record.result_type === "revision_staged"
-        ? "revision_staged"
-        : record.resultType === "clarify" || record.result_type === "clarify"
-          ? "clarify"
-          : "answer",
+    resultType,
     documentSessionId: asNonEmptyString(record.documentSessionId ?? record.document_session_id) ?? null,
     baseRevisionId: asNonEmptyString(record.baseRevisionId ?? record.base_revision_id) ?? null,
-    revisionId:
-      asNonEmptyString(record.revisionId ?? record.revision_id) ??
-      proposal?.revisionId ??
-      review?.revisionId ??
-      null,
+    revisionId,
     status: asNonEmptyString(record.status) ?? "completed",
     usage: parseTurnUsage(record.usage),
     proposal,
@@ -544,6 +711,84 @@ function extractErrorMessageFromBody(bodyText: string, fallbackMessage: string) 
   return extractErrorMessage(tryParseJson(trimmed)) ?? trimmed;
 }
 
+function toolActivityReasoningText(activity: ToolActivity) {
+  const value = activity.reasoningText ?? activity.reasoning_text;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function compactHistoryReasoning(text: string, maxChars = 1200) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxChars - 16).trimEnd()} ...[truncated]`;
+}
+
+function recentReasoningContext(message: ChatMessage, limit = 2) {
+  const reasoningByRequest = new Map<number, { requestIndex: number; phase: string; text: string }>();
+  let fallbackIndex = 0;
+
+  for (const activity of message.toolActivity ?? []) {
+    if (asNonEmptyString(activity.tool) !== "llm_inference") {
+      continue;
+    }
+
+    fallbackIndex += 1;
+    const rawRequestIndex = activity.requestIndex ?? activity.request_index;
+    const requestIndex = typeof rawRequestIndex === "number" && Number.isFinite(rawRequestIndex)
+      ? rawRequestIndex
+      : fallbackIndex;
+    const text = compactHistoryReasoning(toolActivityReasoningText(activity));
+    if (!text) {
+      continue;
+    }
+
+    const phase = asNonEmptyString(activity.phase) ?? "";
+    const existing = reasoningByRequest.get(requestIndex);
+    if (!existing || text.length >= existing.text.length || asNonEmptyString(activity.event) === "tool_finished") {
+      reasoningByRequest.set(requestIndex, { requestIndex, phase, text });
+    }
+  }
+
+  const recentEntries = [...reasoningByRequest.values()]
+    .sort((left, right) => left.requestIndex - right.requestIndex)
+    .slice(-limit);
+
+  if (recentEntries.length === 0) {
+    return "";
+  }
+
+  return recentEntries
+    .map((entry) => {
+      const header = entry.phase
+        ? `[API request #${entry.requestIndex} · ${entry.phase}]`
+        : `[API request #${entry.requestIndex}]`;
+      return `${header}\n${entry.text}`;
+    })
+    .join("\n\n");
+}
+
+function serializeHistoryMessageContent(message: ChatMessage) {
+  const content = message.content.trim();
+  if (message.role !== "assistant") {
+    return content;
+  }
+
+  const reasoning = recentReasoningContext(message, 2);
+  if (!reasoning) {
+    return content;
+  }
+
+  return [
+    content,
+    "Recent internal reasoning context from the last 2 API requests:",
+    reasoning,
+  ].filter(Boolean).join("\n\n");
+}
+
 interface AgentTurnStreamCallbacks {
   onTextChunk?: (chunk: string) => void;
   onToolActivity?: (toolActivity: ToolActivity[]) => void;
@@ -568,7 +813,16 @@ async function readAgentEventStream(
   let message = "";
   const notices: AgentNotice[] = [];
   const toolActivity: ToolActivity[] = [];
+  const reasoningProgressByKey = new Map<string, string>();
+  const progressActivityIndexByKey = new Map<string, number>();
   let finalPayload: AgentTurnResponse | null = null;
+
+  const toolProgressKey = (record: Record<string, unknown>) => {
+    const tool = asNonEmptyString(record.tool) ?? "llm_inference";
+    const phase = asNonEmptyString(record.phase) ?? "";
+    const requestIndex = asNumber(record.requestIndex ?? record.request_index, 0);
+    return [tool, phase, requestIndex > 0 ? String(requestIndex) : ""].join(":");
+  };
 
   const processEventBlock = (eventBlock: string) => {
     if (!eventBlock.trim()) {
@@ -609,6 +863,50 @@ async function readAgentEventStream(
         if (traceId && apiBaseUrl) {
           void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.tool_activity", activity);
         }
+      }
+      return;
+    }
+
+    if (eventName === "reasoning_delta") {
+      const record = asRecord(parsed);
+      const delta = asNonEmptyString(record.reasoningDelta ?? record.reasoning_delta ?? record.chunk ?? record.message);
+      if (!delta) {
+        return;
+      }
+
+      const progressKey = toolProgressKey(record);
+      const accumulatedReasoning = `${reasoningProgressByKey.get(progressKey) ?? ""}${delta}`;
+      reasoningProgressByKey.set(progressKey, accumulatedReasoning);
+
+      const requestIndex = asNumber(record.requestIndex ?? record.request_index, 0);
+      const activity = parseToolActivity({
+        event: "tool_progress",
+        tool: asNonEmptyString(record.tool) ?? "llm_inference",
+        phase: asNonEmptyString(record.phase) ?? undefined,
+        requestIndex: requestIndex > 0 ? requestIndex : undefined,
+        reasoningText: accumulatedReasoning,
+        reasoningChunkCount: asNumber(record.reasoningChunkCount ?? record.reasoning_chunk_count, 0),
+        reasoningCharCount: accumulatedReasoning.trim().length,
+      });
+
+      if (!activity) {
+        return;
+      }
+
+      const existingIndex = progressActivityIndexByKey.get(progressKey);
+      if (existingIndex === undefined) {
+        progressActivityIndexByKey.set(progressKey, toolActivity.length);
+        toolActivity.push(activity);
+      } else {
+        toolActivity[existingIndex] = activity;
+      }
+
+      onToolActivity?.([...toolActivity]);
+      if (traceId && apiBaseUrl) {
+        void logFrontendDebug(apiBaseUrl, traceId, "agent_turn.stream.reasoning_delta", {
+          ...record,
+          reasoningLength: accumulatedReasoning.length,
+        });
       }
       return;
     }
@@ -719,6 +1017,7 @@ export async function sendAgentTurnToBackend(args: {
   visibleBlockIds?: string[];
   history: ChatMessage[];
   prompt: string;
+  forceCompact?: boolean;
   onTextChunk?: (chunk: string) => void;
   onToolActivity?: (toolActivity: ToolActivity[]) => void;
   onNotice?: (notices: AgentNotice[]) => void;
@@ -733,6 +1032,7 @@ export async function sendAgentTurnToBackend(args: {
     visibleBlockIds = [],
     history,
     prompt,
+    forceCompact,
     onTextChunk,
     onToolActivity,
     onNotice,
@@ -761,10 +1061,11 @@ export async function sendAgentTurnToBackend(args: {
       maxParallelTools: settings.agentConfig.maxParallelTools,
       maxHeavyToolsPerTurn: settings.agentConfig.maxHeavyToolsPerTurn,
       autoCompactSession: settings.agentConfig.autoCompactSession,
+      ...(forceCompact ? { forceCompact: true } : {}),
     },
     history: history.map((message) => ({
       role: message.role === "error" ? "assistant" : message.role,
-      content: message.content,
+      content: serializeHistoryMessageContent(message),
     })),
   };
 
@@ -918,6 +1219,25 @@ export async function applyRevisionInBackend(args: {
   return readJsonResponse(response, "Failed to apply revision.", parseSessionRefreshPayload);
 }
 
+export async function applyPartialRevisionInBackend(args: {
+  settings: AppSettings;
+  revisionId: string;
+  acceptedIndices: number[];
+}): Promise<SessionRefreshPayload> {
+  const { settings, revisionId, acceptedIndices } = args;
+  const response = await fetchWithTimeout(
+    joinUrl(settings.apiBaseUrl, `/api/agent/revisions/${revisionId}/apply-partial`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ acceptedIndices }),
+    },
+    settings.requestTimeoutMs,
+  );
+
+  return readJsonResponse(response, "Failed to apply partial revision.", parseSessionRefreshPayload);
+}
+
 export async function rejectRevisionInBackend(args: {
   settings: AppSettings;
   revisionId: string;
@@ -932,6 +1252,28 @@ export async function rejectRevisionInBackend(args: {
   return readJsonResponse(response, "Failed to reject revision.", parseSessionRefreshPayload);
 }
 
+export async function fetchPendingRevisionPreview(args: {
+  settings: AppSettings;
+  revisionId: string;
+  signal?: AbortSignal;
+}): Promise<PendingRevisionPreview> {
+  const { settings, revisionId, signal } = args;
+  const response = await fetchWithTimeout(
+    joinUrl(settings.apiBaseUrl, `/api/agent/revisions/${revisionId}/preview`),
+    { method: "GET", headers: { "Content-Type": "application/json" } },
+    settings.requestTimeoutMs,
+    signal,
+  );
+
+  return readJsonResponse(response, "Failed to preview pending revision.", (payload) => {
+    const preview = parsePendingRevisionPreview(payload);
+    if (!preview) {
+      throw new ApiError("Failed to parse pending revision preview.", response.status);
+    }
+    return preview;
+  });
+}
+
 export async function rollbackRevisionInBackend(args: {
   settings: AppSettings;
   revisionId: string;
@@ -944,6 +1286,20 @@ export async function rollbackRevisionInBackend(args: {
   );
 
   return readJsonResponse(response, "Failed to roll back revision.", parseSessionRefreshPayload);
+}
+
+export async function restoreRevisionInBackend(args: {
+  settings: AppSettings;
+  revisionId: string;
+}): Promise<SessionRefreshPayload> {
+  const { settings, revisionId } = args;
+  const response = await fetchWithTimeout(
+    joinUrl(settings.apiBaseUrl, `/api/agent/revisions/${revisionId}/restore`),
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+    settings.requestTimeoutMs,
+  );
+
+  return readJsonResponse(response, "Failed to restore checkpoint.", parseSessionRefreshPayload);
 }
 
 export function getErrorMessage(error: unknown) {
@@ -1072,6 +1428,28 @@ export async function deleteDocumentFromBackend(baseUrl: string, documentId: str
   return { ok: true };
 }
 
+/**
+ * Push the frontend's current source HTML to the backend so that doc-mcp
+ * tools operate on the latest version of the document before each agent turn.
+ * Errors are intentionally swallowed — a stale sync is preferable to blocking
+ * the user from sending a message.
+ */
+export async function syncSessionHtml(
+  baseUrl: string,
+  sessionId: string,
+  html: string,
+): Promise<void> {
+  try {
+    await fetch(joinUrl(baseUrl, `/api/agent/sessions/${sessionId}/html`), {
+      method: "PUT",
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+      body: html,
+    });
+  } catch {
+    // best-effort; do not block the turn on sync failure
+  }
+}
+
 export async function saveChat(
   baseUrl: string,
   chat: { id: string; name: string; documentId: string; messages: ChatMessage[] },
@@ -1128,7 +1506,14 @@ export async function deleteChat(baseUrl: string, chatId: string) {
   });
 
   if (!response.ok) {
-    throw new ApiError("Failed to delete chat", response.status);
+    let detail = "Failed to delete chat";
+    try {
+      const body = await response.json();
+      detail = body?.detail ?? detail;
+    } catch {
+      // ignore
+    }
+    throw new ApiError(detail, response.status);
   }
 
   return { ok: true };

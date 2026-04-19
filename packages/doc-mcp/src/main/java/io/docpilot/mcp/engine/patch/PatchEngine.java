@@ -97,15 +97,44 @@ public class PatchEngine {
      * @param author     "ai" or "manual"
      */
     public void apply(Patch patch, DocumentSession session, String revisionId, String author) {
+        PatchValidation validation = dryRun(patch, session);
+        if (!validation.getErrors().isEmpty()) {
+            throw new IllegalStateException("Patch cannot be applied: " + String.join("; ", validation.getErrors()));
+        }
+
         Map<String, DocumentComponent> index = anchorService.buildIndex(session.getRoot());
 
-        for (PatchOperation op : patch.getOperations()) {
-            if (op.getTarget() == null) continue;
+        for (int opIndex = 0; opIndex < patch.getOperations().size(); opIndex++) {
+            PatchOperation op = patch.getOperations().get(opIndex);
+            
+            if (op.getTarget() == null) {
+                throw new IllegalStateException("Patch operation " + op.getOp() + " is missing a target.");
+            }
 
             Optional<DocumentComponent> resolved = resolveTarget(op.getTarget(), session, index);
             if (resolved.isEmpty()) {
-                log.warn("apply: skipping op {} — target {} not found", op.getOp(), describeTarget(op.getTarget()));
-                continue;
+                String targetDesc = describeTarget(op.getTarget());
+                String blockId = op.getTarget().getBlockId();
+                List<String> availableBlockIds = new ArrayList<>(index.keySet());
+                
+                String errorMsg = String.format(
+                    "Patch target disappeared during apply at operation %d/%d: %s (blockId: %s)%n" +
+                    "Operation type: %s%n" +
+                    "Available blocks: %s%n" +
+                    "Suggestion: The document may have been modified since the patch was staged. Try re-staging the revision.",
+                    opIndex + 1, 
+                    patch.getOperations().size(),
+                    targetDesc,
+                    blockId != null ? blockId : "N/A",
+                    op.getOp(),
+                    availableBlockIds.isEmpty() ? "(empty)" : availableBlockIds
+                );
+                
+                log.error("Patch apply failed: {}", errorMsg);
+                log.error("Patch ID: {}, Session ID: {}, Revision ID: {}", 
+                    patch.getPatchId(), session.getSessionId(), revisionId);
+                
+                throw new IllegalStateException(errorMsg);
             }
 
             DocumentComponent component = resolved.get();
@@ -172,6 +201,23 @@ public class PatchEngine {
                     if (level < 1 || level > 6) {
                         errors.add("SET_HEADING_LEVEL: level " + level + " out of range (1–6)");
                     }
+                }
+            }
+            case APPLY_STYLE -> {
+                String styleId = extractStringValue(op.getValue(), "styleId", "style_id");
+                if (styleId == null || styleId.isBlank()) {
+                    errors.add("APPLY_STYLE: value.style_id is required");
+                }
+            }
+            case CREATE_BLOCK -> {
+                if (op.getValue() == null || op.getValue().isNull()) {
+                    errors.add("CREATE_BLOCK: value is required");
+                }
+            }
+            case CHANGE_LIST_TYPE -> {
+                String listType = extractStringValue(op.getValue(), "listType", "list_type", "type");
+                if (listType == null || listType.isBlank()) {
+                    errors.add("CHANGE_LIST_TYPE: value.list_type is required");
                 }
             }
             default -> { /* no additional validation */ }
@@ -290,7 +336,7 @@ public class PatchEngine {
         try {
             DocumentComponent parent = afterTarget.getParentId() != null ? index.get(afterTarget.getParentId()) : null;
             if (parent == null) {
-                return;
+                throw new IllegalStateException("CREATE_BLOCK target has no writable parent.");
             }
 
             if (parent.getChildren() == null) {
@@ -317,7 +363,7 @@ public class PatchEngine {
                 children.add(newBlock);
             }
         } catch (Exception e) {
-            log.error("CREATE_BLOCK failed: {}", e.getMessage(), e);
+            throw new IllegalStateException("CREATE_BLOCK failed: " + e.getMessage(), e);
         }
     }
 

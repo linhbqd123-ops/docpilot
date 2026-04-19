@@ -151,6 +151,20 @@ class DocMcpClient:
         data = await self._request("GET", f"/api/sessions/{session_id}")
         return self._as_json_dict(data)
 
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a doc-mcp session and all associated data (revisions, patches, snapshots)."""
+        await self._request("DELETE", f"/api/sessions/{session_id}", expected="json")
+
+    async def update_session_html(self, session_id: str, html: str) -> None:
+        """Push updated source HTML to doc-mcp so it stays in sync with the frontend."""
+        await self._request(
+            "PUT",
+            f"/api/sessions/{session_id}/html",
+            expected="json",
+            content=html.encode("utf-8"),
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+
     async def get_session_summary(self, session_id: str) -> dict[str, Any]:
         data = await self._request("GET", f"/api/sessions/{session_id}/summary")
         return self._as_json_dict(data)
@@ -196,19 +210,36 @@ class DocMcpClient:
         )
 
     async def get_revision(self, revision_id: str) -> dict[str, Any]:
-        data = await self._request("GET", f"/api/revisions/{revision_id}")
+        data = await self._request("GET", f"/api/revisions/{revision_id}", context={"revisionId": revision_id})
+        return self._as_json_dict(data)
+    
+    async def preview_revision(self, revision_id: str) -> dict[str, Any]:
+        data = await self._request("GET", f"/api/revisions/{revision_id}/preview", context={"revisionId": revision_id, "operation": "preview"})
         return self._as_json_dict(data)
 
     async def apply_revision(self, revision_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/api/revisions/{revision_id}/apply")
+        data = await self._request("POST", f"/api/revisions/{revision_id}/apply", context={"revisionId": revision_id, "operation": "apply"})
+        return self._as_json_dict(data)
+
+    async def apply_partial_revision(self, revision_id: str, accepted_indices: list[int]) -> dict[str, Any]:
+        data = await self._request(
+            "POST",
+            f"/api/revisions/{revision_id}/apply-partial",
+            json={"accepted_indices": accepted_indices},
+            context={"revisionId": revision_id, "operation": "apply-partial"},
+        )
         return self._as_json_dict(data)
 
     async def reject_revision(self, revision_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/api/revisions/{revision_id}/reject")
+        data = await self._request("POST", f"/api/revisions/{revision_id}/reject", context={"revisionId": revision_id, "operation": "reject"})
         return self._as_json_dict(data)
 
     async def rollback_revision(self, revision_id: str) -> dict[str, Any]:
-        data = await self._request("POST", f"/api/revisions/{revision_id}/rollback")
+        data = await self._request("POST", f"/api/revisions/{revision_id}/rollback", context={"revisionId": revision_id, "operation": "rollback"})
+        return self._as_json_dict(data)
+
+    async def restore_revision(self, revision_id: str) -> dict[str, Any]:
+        data = await self._request("POST", f"/api/revisions/{revision_id}/restore", context={"revisionId": revision_id, "operation": "restore"})
         return self._as_json_dict(data)
 
     async def review_pending_revision(self, session_id: str, revision_id: str) -> dict[str, Any]:
@@ -278,6 +309,7 @@ class DocMcpClient:
         path: str,
         *,
         expected: str = "json",
+        context: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         request_kwargs = dict(kwargs)
@@ -304,35 +336,42 @@ class DocMcpClient:
                 }
             }
 
-        log_core_event(
-            "doc_mcp.request",
-            method=method,
-            url=f"{self.base_url}{path}",
-            expected=expected,
-            headers=sanitize_headers(headers),
-            payload=request_payload,
-        )
+        log_payload = {
+            "method": method,
+            "url": f"{self.base_url}{path}",
+            "expected": expected,
+            "headers": sanitize_headers(headers),
+            "payload": request_payload,
+        }
+        if context:
+            log_payload.update(context)
+
+        log_core_event("doc_mcp.request", **log_payload)
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.request(method, f"{self.base_url}{path}", **request_kwargs)
         except httpx.ConnectError as exc:
-            log_core_event(
-                "doc_mcp.error",
-                method=method,
-                url=f"{self.base_url}{path}",
-                error=str(exc),
-            )
+            error_payload = {
+                "method": method,
+                "url": f"{self.base_url}{path}",
+                "error": str(exc),
+            }
+            if context:
+                error_payload.update(context)
+            log_core_event("doc_mcp.error", **error_payload)
             raise DocMcpUnavailableError(
                 f"Doc-mcp service is unavailable at {self.base_url}."
             ) from exc
         except httpx.HTTPError as exc:
-            log_core_event(
-                "doc_mcp.error",
-                method=method,
-                url=f"{self.base_url}{path}",
-                error=str(exc),
-            )
+            error_payload = {
+                "method": method,
+                "url": f"{self.base_url}{path}",
+                "error": str(exc),
+            }
+            if context:
+                error_payload.update(context)
+            log_core_event("doc_mcp.error", **error_payload)
             raise DocMcpError(f"Doc-mcp request failed: {exc}") from exc
 
         response_payload: Any
@@ -349,14 +388,17 @@ class DocMcpClient:
             except json.JSONDecodeError:
                 response_payload = response.text
 
-        log_core_event(
-            "doc_mcp.response",
-            method=method,
-            url=f"{self.base_url}{path}",
-            statusCode=response.status_code,
-            contentType=response.headers.get("content-type", ""),
-            body=response_payload,
-        )
+        log_response_payload = {
+            "method": method,
+            "url": f"{self.base_url}{path}",
+            "statusCode": response.status_code,
+            "contentType": response.headers.get("content-type", ""),
+            "body": response_payload,
+        }
+        if context:
+            log_response_payload.update(context)
+
+        log_core_event("doc_mcp.response", **log_response_payload)
 
         if not response.is_success:
             message, error_code, items, _http_status, retryable = _extract_error_details(response_payload)

@@ -20,6 +20,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 
@@ -177,5 +178,39 @@ public class SessionController {
             Map.entry("created_at", revision.getCreatedAt() != null ? revision.getCreatedAt().toString() : ""),
             Map.entry("applied_at", revision.getAppliedAt() != null ? revision.getAppliedAt().toString() : "")
         );
+    }
+
+    // ─── delete session ───────────────────────────────────────────────────────
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Map<String, Object>> deleteSession(@PathVariable String id) {
+        if (sessionStore.find(id).isEmpty()) {
+            throw new NotFoundException("Session not found: " + id);
+        }
+        sessionStore.delete(id);
+        log.info("Deleted session: sessionId={}", id);
+        return ResponseEntity.ok(Map.of("ok", true, "session_id", id));
+    }
+
+    // ─── update source HTML ───────────────────────────────────────────────────
+
+    /**
+     * PUT /api/sessions/{id}/html
+     * Accept updated source HTML from the frontend and persist it as the current
+     * source/analysis assets.  This keeps doc-mcp in sync with the FE's view of
+     * the document between agent turns.
+     */
+    @PutMapping(value = "/{id}/html", consumes = { MediaType.TEXT_HTML_VALUE, MediaType.TEXT_PLAIN_VALUE, MediaType.APPLICATION_JSON_VALUE, "*/*" })
+    public ResponseEntity<Map<String, Object>> updateSourceHtml(
+            @PathVariable String id,
+            @RequestBody byte[] htmlBytes) {
+        sessionStore.find(id)
+            .orElseThrow(() -> new NotFoundException("Session not found: " + id));
+        String html = new String(htmlBytes, StandardCharsets.UTF_8);
+        sessionStore.saveTextAsset(id, FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME, html);
+        sessionStore.saveTextAsset(id, FidelityHtmlService.CURRENT_ANALYSIS_ASSET_NAME,
+                analysisHtmlConverter.convert(html));
+        log.debug("Updated source HTML for session: sessionId={} length={}", id, html.length());
+        return ResponseEntity.ok(Map.of("ok", true, "session_id", id));
     }
 }

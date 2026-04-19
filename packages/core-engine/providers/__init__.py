@@ -67,6 +67,7 @@ class ProviderConfig:
     api_key_env: str = ""
     default_model: str = ""
     default_model_env: str = ""
+    supports_native_structured_output: bool = True
     # Optional extra HTTP headers required by some providers (e.g. OpenRouter)
     extra_headers: dict[str, str] = field(default_factory=dict)
 
@@ -188,6 +189,7 @@ REGISTRY: dict[str, ProviderConfig] = {
         api_key_env="NVIDIA_API_KEY",
         default_model="meta/llama-3.1-70b-instruct",
         default_model_env="NVIDIA_DEFAULT_MODEL",
+        supports_native_structured_output=False,
     ),
     "zai": ProviderConfig(
         display_name="z.ai",
@@ -292,6 +294,7 @@ def get_provider(name: ProviderName, model_override: str | None = None) -> BaseP
         api_key=cfg.resolve_api_key(),
         default_model=resolved_model,
         extra_headers=cfg.extra_headers,
+        supports_native_structured_output=cfg.supports_native_structured_output,
     )
     return _attach_provider_metadata(
         provider,

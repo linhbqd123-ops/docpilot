@@ -116,10 +116,17 @@ async def delete_library_document(
     store: SQLiteDocumentStore = Depends(get_document_store),
     chat_store: SQLiteChatStore = Depends(get_chat_store),
 ):
-    deleted = store.delete_document(document_id)
-    if not deleted:
+    document = store.get_document(document_id)
+    if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    document_session_id: str | None = document.get("documentSessionId")
+    store.delete_document(document_id)
     chat_store.delete_chats_for_document(document_id)
+    if document_session_id:
+        try:
+            await _doc_mcp_client().delete_session(document_session_id)
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; session may already be gone
     return {"ok": True}
 
 

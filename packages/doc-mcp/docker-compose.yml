@@ -32,18 +32,7 @@ services:
       SQLITE_ARCHIVE_LEGACY_JSON: "true"
       SQLITE_OPTIMIZE_ON_STARTUP: "true"
       LOG_FILE: /app/logs/doc-mcp.log
-      PERSONALIZATION_PROVIDER: ${PERSONALIZATION_PROVIDER:-disabled}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
-      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-docpilot_personalization}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
-      EMBEDDING_API_URL: ${EMBEDDING_API_URL:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
-      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
-      PERSONALIZATION_REQUEST_TIMEOUT_MS: ${PERSONALIZATION_REQUEST_TIMEOUT_MS:-15000}
-      PERSONALIZATION_MAX_SEARCH_RESULTS: ${PERSONALIZATION_MAX_SEARCH_RESULTS:-8}
-      PERSONALIZATION_MAX_INDEXED_CHARS: ${PERSONALIZATION_MAX_INDEXED_CHARS:-1200}
+      # Personalization removed — related env vars were removed
       # Processing limits
       MAX_FILE_SIZE: 100MB
       MAX_REQUEST_SIZE: 110MB
@@ -70,18 +59,7 @@ services:
       retries: 3
       start_period: 45s
 
-  qdrant:
-    image: qdrant/qdrant:v1.13.4
-    container_name: docpilot-qdrant
-    restart: unless-stopped
-    profiles: ["personalization"]
-    command: ["./qdrant", "--config-path", "/qdrant/config/local.yaml"]
-    ports:
-      - "${QDRANT_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
-    volumes:
-      - qdrant_storage:/qdrant/storage
-      - ./packaging/qdrant/config.local.yaml:/qdrant/config/local.yaml:ro
+  # qdrant service (removed)
 
 volumes:
   doc_uploads:
@@ -99,4 +77,4 @@ volumes:
   doc_logs:
     driver: local
   qdrant_storage:
-    driver: local
+    # removed (was used for personalization/qdrant)

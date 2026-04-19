@@ -20,6 +20,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class PatchEngineTest {
 
@@ -104,6 +105,36 @@ class PatchEngineTest {
         assertEquals(1, clone.getChildren().size());
         assertEquals("Preserve me", clone.getChildren().get(0).getContentProps().getText());
         assertEquals("style-accent", clone.getChildren().get(0).getStyleRef().getStyleId());
+    }
+
+    @Test
+    void applyFailsWhenTargetCannotBeResolved() {
+        DocumentComponent paragraph = DocumentComponent.builder()
+            .id("paragraph-1")
+            .type(ComponentType.PARAGRAPH)
+            .contentProps(ContentProps.builder().text("Hello World").build())
+            .children(new ArrayList<>())
+            .build();
+        DocumentSession session = sessionWith(paragraph);
+
+        Patch patch = Patch.builder()
+            .patchId("patch-missing")
+            .operations(List.of(
+                PatchOperation.builder()
+                    .op(OperationType.REPLACE_TEXT_RANGE)
+                    .target(PatchTarget.builder().blockId("missing-block").start(0).end(5).build())
+                    .value(objectMapper.valueToTree("DocPilot"))
+                    .build()
+            ))
+            .build();
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> patchEngine.apply(patch, session, "rev-missing", "ai")
+        );
+
+        assertEquals("Patch cannot be applied: Cannot locate target block=missing-block", error.getMessage());
+        assertEquals("Hello World", paragraph.getContentProps().getText());
     }
 
     private static DocumentSession sessionWith(DocumentComponent paragraph) {

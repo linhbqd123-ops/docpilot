@@ -298,7 +298,7 @@ export function applyDocumentSessionSummary(
 export function stageDocumentReview(
   document: DocumentRecord,
   details: {
-    revisionId: string;
+    revisionId: string | null | undefined;
     reviewPayload: RevisionReview | null;
     status?: string | null;
     baseRevisionId?: string | null;
@@ -306,7 +306,7 @@ export function stageDocumentReview(
 ): DocumentRecord {
   return {
     ...document,
-    pendingRevisionId: details.revisionId,
+    pendingRevisionId: details.revisionId ?? undefined,
     reviewPayload: details.reviewPayload,
     revisionStatus: details.status ?? details.reviewPayload?.status ?? "PENDING",
     baseRevisionId: details.baseRevisionId ?? document.baseRevisionId ?? null,

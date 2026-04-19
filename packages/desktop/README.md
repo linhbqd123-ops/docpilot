@@ -42,4 +42,4 @@ Additional optional `VITE_DOCPILOT_*` variables can preselect provider/model def
 
 ## Packaging status
 
-This package currently outputs static web assets. The Windows app-image flow in this repo packages `doc-mcp` and a Qdrant sidecar, not this frontend into a single native executable.
+This package currently outputs static web assets. The Windows app-image flow in this repo packages `doc-mcp` rather than bundling the frontend into a single native executable.

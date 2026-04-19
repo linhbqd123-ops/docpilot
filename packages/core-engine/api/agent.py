@@ -2,6 +2,7 @@ import json
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException
+from fastapi.requests import Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,8 +10,13 @@ from agents.turn_orchestrator import stream_turn
 from debug_logging import get_trace_id, log_core_event
 from providers import ProviderName, get_provider
 from services.doc_mcp_client import DocMcpClient, MappedDocMcpError, map_doc_mcp_error
+from services.provider_settings_store import ProviderSettingsStore
+from config import settings
 
 router = APIRouter()
+
+# Initialize provider settings store
+_provider_settings_store = ProviderSettingsStore(settings.chat_database_path)
 
 
 class TextRange(BaseModel):
@@ -56,6 +62,9 @@ class AgentExecutionConfig(BaseModel):
     max_parallel_tools: int | None = Field(default=None, alias="maxParallelTools")
     max_heavy_tools_per_turn: int | None = Field(default=None, alias="maxHeavyToolsPerTurn")
     auto_compact_session: bool | None = Field(default=None, alias="autoCompactSession")
+    # If true, this request is explicitly asking the server to perform compaction
+    # for this turn even if server config disables auto-compaction.
+    force_compact: bool | None = Field(default=None, alias="forceCompact")
     auto_compact_threshold: float | None = Field(default=None, alias="autoCompactThreshold")
 
     def to_payload(self) -> dict[str, Any]:
@@ -96,8 +105,23 @@ def _sse(event_name: str, payload: Any) -> str:
 
 
 def _resolve_provider(name: ProviderName, model_override: str | None):
+    """
+    Resolve a provider with optional model override.
+    
+    Priority:
+    1. model_override parameter (from frontend request)
+    2. Model override from DB (per-provider setting)
+    3. Default model from provider config
+    """
     try:
-        return get_provider(name, model_override=model_override)
+        # If no override from frontend, check DB for saved per-provider override
+        effective_model = model_override
+        if not effective_model:
+            db_model = _provider_settings_store.get_model_override(name)
+            if db_model:
+                effective_model = db_model
+        
+        return get_provider(name, model_override=effective_model)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -108,12 +132,21 @@ def _mapped_doc_mcp_error(exc: Exception) -> MappedDocMcpError:
         internal_message="The assistant could not complete the document request right now. Please try again.",
     )
 
-import logging
-logging.basicConfig(level=logging.ERROR)
 
-def _map_doc_mcp_error(exc: Exception) -> HTTPException:
-    logging.error("Document MCP error occurred", exc_info=exc)
+def _map_doc_mcp_error(exc: Exception, *, context: dict[str, Any] | None = None) -> HTTPException:
+    """Map a doc-mcp error to HTTPException with structured logging."""
     mapped = _mapped_doc_mcp_error(exc)
+    error_payload = {
+        "error": str(exc),
+        "errorCode": mapped.code or "unknown",
+        "mappedStatus": mapped.status_code,
+        "errorItems": list(mapped.items) if mapped.items else None,
+        "exceptionType": type(exc).__name__,
+        "exception": exc,
+    }
+    if context:
+        error_payload["context"] = context
+    log_core_event("agent.error.doc_mcp", **error_payload)
     return HTTPException(status_code=mapped.status_code, detail=mapped.message)
 
 
@@ -305,6 +338,22 @@ async def list_agent_session_revisions(session_id: str, status: str | None = Non
         raise _map_doc_mcp_error(exc) from exc
 
 
+@router.put("/agent/sessions/{session_id}/html")
+async def sync_session_html(session_id: str, request: Request):
+    """
+    Accept the frontend's current source HTML and forward it to doc-mcp.
+    This keeps the stored HTML in sync before each agent turn so that MCP
+    tools always operate on the most up-to-date version of the document.
+    """
+    client = _doc_mcp_client()
+    try:
+        html = (await request.body()).decode("utf-8")
+        await client.update_session_html(session_id, html)
+        return {"ok": True, "documentSessionId": session_id}
+    except Exception as exc:  # noqa: BLE001
+        raise _map_doc_mcp_error(exc) from exc
+
+
 @router.get("/agent/revisions/{revision_id}")
 async def get_agent_revision(revision_id: str):
     client = _doc_mcp_client()
@@ -319,17 +368,40 @@ async def get_agent_revision(revision_id: str):
     except Exception as exc:  # noqa: BLE001
         raise _map_doc_mcp_error(exc) from exc
 
+@router.get("/agent/revisions/{revision_id}/preview")
+async def preview_agent_revision(revision_id: str):
+    client = _doc_mcp_client()
+    try:
+        preview = await client.preview_revision(revision_id)
+        session_id = preview.get("sessionId") or preview.get("session_id")
+        return {
+            "revisionId": revision_id,
+            "documentSessionId": session_id,
+            **preview,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "preview"}) from exc
+
 
 @router.post("/agent/revisions/{revision_id}/apply")
 async def apply_agent_revision(revision_id: str):
     client = _doc_mcp_client()
     try:
+        log_core_event(
+            "agent.revision.apply.start",
+            revisionId=revision_id,
+        )
         revision = await client.get_revision(revision_id)
         session_id = revision.get("sessionId") or revision.get("session_id")
         if not session_id:
             raise HTTPException(status_code=500, detail="Revision does not include a session id.")
         result = await client.apply_revision(revision_id)
         session_payload = await _session_payload(session_id)
+        log_core_event(
+            "agent.revision.apply.success",
+            revisionId=revision_id,
+            sessionId=session_id,
+        )
         return {
             "result": result,
             **session_payload,
@@ -338,35 +410,68 @@ async def apply_agent_revision(revision_id: str):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise _map_doc_mcp_error(exc) from exc
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "apply"}) from exc
+
+
+class PartialApplyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    accepted_indices: list[int] = Field(default_factory=list, alias="acceptedIndices")
+
+
+@router.post("/agent/revisions/{revision_id}/apply-partial")
+async def apply_partial_agent_revision(revision_id: str, body: PartialApplyRequest):
+    client = _doc_mcp_client()
+    try:
+        log_core_event("agent.revision.apply_partial.start", revisionId=revision_id)
+        revision = await client.get_revision(revision_id)
+        session_id = revision.get("sessionId") or revision.get("session_id")
+        if not session_id:
+            raise HTTPException(status_code=500, detail="Revision does not include a session id.")
+        result = await client.apply_partial_revision(revision_id, body.accepted_indices)
+        session_payload = await _session_payload(session_id)
+        log_core_event("agent.revision.apply_partial.success", revisionId=revision_id, sessionId=session_id)
+        return {
+            "result": result,
+            **session_payload,
+            **(await _session_render_payload(session_id)),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "apply-partial"}) from exc
 
 
 @router.post("/agent/revisions/{revision_id}/reject")
 async def reject_agent_revision(revision_id: str):
     client = _doc_mcp_client()
     try:
+        log_core_event("agent.revision.reject.start", revisionId=revision_id)
         revision = await client.get_revision(revision_id)
         session_id = revision.get("sessionId") or revision.get("session_id")
         result = await client.reject_revision(revision_id)
+        log_core_event("agent.revision.reject.success", revisionId=revision_id, sessionId=session_id)
         payload = {"result": result}
         if session_id:
             payload.update(await _session_payload(session_id))
             payload.update(await _session_render_payload(session_id))
         return payload
     except Exception as exc:  # noqa: BLE001
-        raise _map_doc_mcp_error(exc) from exc
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "reject"}) from exc
 
 
 @router.post("/agent/revisions/{revision_id}/rollback")
 async def rollback_agent_revision(revision_id: str):
     client = _doc_mcp_client()
     try:
+        log_core_event("agent.revision.rollback.start", revisionId=revision_id)
         revision = await client.get_revision(revision_id)
         session_id = revision.get("sessionId") or revision.get("session_id")
         if not session_id:
             raise HTTPException(status_code=500, detail="Revision does not include a session id.")
         result = await client.rollback_revision(revision_id)
         session_payload = await _session_payload(session_id)
+        log_core_event("agent.revision.rollback.success", revisionId=revision_id, sessionId=session_id)
         return {
             "result": result,
             **session_payload,
@@ -375,7 +480,30 @@ async def rollback_agent_revision(revision_id: str):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise _map_doc_mcp_error(exc) from exc
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "rollback"}) from exc
+
+
+@router.post("/agent/revisions/{revision_id}/restore")
+async def restore_agent_revision(revision_id: str):
+    client = _doc_mcp_client()
+    try:
+        log_core_event("agent.revision.restore.start", revisionId=revision_id)
+        revision = await client.get_revision(revision_id)
+        session_id = revision.get("sessionId") or revision.get("session_id")
+        if not session_id:
+            raise HTTPException(status_code=500, detail="Revision does not include a session id.")
+        result = await client.restore_revision(revision_id)
+        session_payload = await _session_payload(session_id)
+        log_core_event("agent.revision.restore.success", revisionId=revision_id, sessionId=session_id)
+        return {
+            "result": result,
+            **session_payload,
+            **(await _session_render_payload(session_id)),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _map_doc_mcp_error(exc, context={"revisionId": revision_id, "operation": "restore"}) from exc
 
 
 @router.post("/agent/revisions/compare")

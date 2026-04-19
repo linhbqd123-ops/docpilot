@@ -1,4 +1,6 @@
 import asyncio
+import html
+import itertools
 import json
 import math
 import re
@@ -6,22 +8,45 @@ from typing import Any, AsyncIterator
 
 from config import settings
 from debug_logging import get_trace_id, log_core_event
-from providers.base import BaseProvider
+from providers.base import BaseProvider, StructuredOutputNotSupportedError
 from services.doc_mcp_client import DocMcpClient
+from prompts import ASK_SYSTEM_PROMPT, build_agent_system_prompt
 
 _EDIT_REWRITE_PATTERN = re.compile(
     r"(?is)\b(?:replace|change|update|modify|fix|correct|edit|rewrite|sửa|chỉnh(?:[\s\-]*lại)?|thay(?:[\s\-]*(?:đổi|thế))?|cập[\s\-]*nhật)\s+"
     r"(?P<source>.+?)"
     r"(?:\s+(?:in|under|inside|within|trong|ở|mục|phần)\s+(?P<section>.+?))?"
-    r"\s+(?:to|with|into|thành|bằng)\s+(?P<replacement>.+)$",
+    r"\s+(?:to|with|into|thành|bằng|\-\>|\=\>|→)\s+(?P<replacement>.+)$",
     re.IGNORECASE | re.UNICODE,
 )
 _QUOTED_TEXT_PATTERN = re.compile(r"[\"'“”‘’](.+?)[\"'“”‘’]", re.DOTALL)
+_LEADING_EDIT_LABEL_PATTERN = re.compile(
+    r"(?is)^(?:the|this|that|a|an|mục|phần|đoạn|nội\s+dung|field|value|text|label|tên|name|email|e\-mail|"
+    r"phone|số\s+điện\s+thoại|điện\s+thoại|mobile|linkedin|url|link|username)\s+"
+)
+_EDIT_INTENT_PATTERN = re.compile(
+    r"(?is)\b(?:replace|change|update|modify|fix|correct|edit|rewrite|apply|revise|sửa|chỉnh(?:[\s\-]*lại)?|thay(?:[\s\-]*(?:đổi|thế))?|cập[\s\-]*nhật|áp[\s\-]*dụng)\b"
+)
+_EDIT_COMPLETION_CLAIM_PATTERN = re.compile(
+    r"(?is)(?:\b(?:i|we)\s+(?:have|already|just)?\s*(?:updated|changed|fixed|edited|replaced|applied|corrected|completed)\b|\b(?:it|this|the document|the cv)\s+(?:has\s+been|is\s+now)\s+(?:updated|changed|fixed|edited|replaced|applied|corrected)\b|\bđã\s+(?:sửa|chỉnh|cập\s*nhật|thay(?:\s*đổi|\s*thế)|áp\s*dụng|hoàn\s*thành|tiến\s*hành\s+(?:sửa|cập\s*nhật|thay\s*thế))\b)"
+)
+_EDIT_BLOCKER_PATTERN = re.compile(
+    r"(?is)(?:\b(?:cannot|can't|unable|could not|need more|need the user|need additional|missing|required clarification|unclear|insufficient)\b|\b(?:không\s+thể|chưa\s+thể|cần\s+thêm|thiếu|không\s+đủ|chưa\s+xác\s+định\s+được|cần\s+làm\s+rõ|mơ\s+hồ)\b)"
+)
 _JSON_FENCE_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
-_MAX_AGENT_LOOP_STEPS = 8
+_MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS = 2
+_MAX_EDIT_FOLLOWTHROUGH_REPAIRS = 1
+_MAX_AGENT_REPAIR_OUTPUT_TOKENS = 8192
 _AGENT_LOOP_PHASE = "agent_loop"
+_RECOVER_EDIT_TARGETS_PHASE = "recover_edit_targets"
 _CONTEXT_COMPACTION_TOOL = "compact_session_context"
 _TOOL_BATCH_EVENT = "tool_batch"
+_HTML_NOISE_PATTERN = re.compile(r"(?is)<(?:script|style)\b.*?>.*?</(?:script|style)>|<!--.*?-->")
+_HTML_LIST_ITEM_PATTERN = re.compile(r"(?is)<\s*li\b[^>]*>")
+_HTML_BLOCK_BREAK_PATTERN = re.compile(
+    r"(?is)<\s*(?:br\s*/?|/p|/div|/li|/tr|/h[1-6]|/section|/article|/ul|/ol)\s*>"
+)
+_HTML_TAG_PATTERN = re.compile(r"(?is)<[^>]+>")
 _AGENT_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "get_session_summary": {
         "tier": "light",
@@ -74,18 +99,122 @@ _AGENT_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 _AGENT_TOOL_NAMES = set(_AGENT_TOOL_SPECS)
+_AGENT_STRUCTURED_OUTPUT_MODE = "native_structured"
+_AGENT_PROMPT_OUTPUT_MODE = "prompt_enforced"
+_AGENT_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "docpilot_agent_action",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["call_tool", "call_tools", "final"],
+                },
+                "execution": {
+                    "type": "string",
+                    "enum": ["parallel", "sequential"],
+                },
+                "batch_reason": {"type": "string"},
+                "tool_name": {
+                    "type": "string",
+                    "enum": [
+                        "get_session_summary",
+                        "answer_about_document",
+                        "inspect_document",
+                        "locate_relevant_context",
+                        "get_context_window",
+                        "get_source_html",
+                        "get_analysis_html",
+                    ],
+                },
+                "arguments": {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+                "tool_calls": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "id": {"type": "string"},
+                            "tool_name": {
+                                "type": "string",
+                                "enum": [
+                                    "get_session_summary",
+                                    "answer_about_document",
+                                    "inspect_document",
+                                    "locate_relevant_context",
+                                    "get_context_window",
+                                    "get_source_html",
+                                    "get_analysis_html",
+                                ],
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["id", "tool_name", "arguments", "reason"],
+                    },
+                },
+                "result_type": {
+                    "type": "string",
+                    "enum": ["answer", "clarify", "propose_edit"],
+                },
+                "assistant_message": {"type": "string"},
+                "summary": {"type": "string"},
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": [
+                                    "REPLACE_TEXT_RANGE",
+                                    "INSERT_TEXT_AT",
+                                    "DELETE_TEXT_RANGE",
+                                    "APPLY_STYLE",
+                                    "APPLY_INLINE_FORMAT",
+                                    "SET_HEADING_LEVEL",
+                                    "CREATE_BLOCK",
+                                    "UPDATE_CELL_CONTENT",
+                                    "CHANGE_LIST_TYPE",
+                                    "CHANGE_LIST_LEVEL",
+                                ],
+                            },
+                            "target": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "value": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "description": {"type": "string"},
+                        },
+                        "required": ["op", "target", "value", "description"],
+                    },
+                },
+                "risks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "needs_review": {"type": "boolean"},
+            },
+            "required": ["action"],
+        },
+    },
+}
 
-ASK_SYSTEM_PROMPT = """You are DocPilot running in ASK mode.
-
-Rules:
-- ASK mode is read-only. Never say you changed the document.
-- If the user asks for edits, explain that ASK mode cannot mutate the document and that they should switch to AGENT mode.
-- Use only the supplied document context.
-- The active document session is already the subject of requests like "this document", "this CV", or "đọc doc trong này".
-- If document snippets, outline data, or analysis HTML are supplied, answer directly from them and do not ask the user to paste the document again.
-- If the context is insufficient, say exactly what is missing.
-- Reply in the same language as the user.
-"""
+# ASK system prompt moved to packages/core-engine/prompts.py
 
 def _tool_registry_prompt() -> str:
         lines: list[str] = []
@@ -97,103 +226,23 @@ def _tool_registry_prompt() -> str:
         return "\n".join(lines)
 
 
-def _build_agent_system_prompt(execution_config: dict[str, Any]) -> str:
-        return f"""You are DocPilot running in AGENT mode.
+def _build_agent_system_prompt(execution_config: dict[str, Any], *, request_mode: str) -> str:
+    return build_agent_system_prompt(
+        execution_config,
+        _tool_registry_prompt(),
+        native_structured_output=request_mode == _AGENT_STRUCTURED_OUTPUT_MODE,
+    )
 
-Return JSON only. No markdown fences. No prose before or after the JSON.
 
-Primary batch tool schema:
-{{
-    "action": "call_tools",
-    "execution": "parallel" | "sequential",
-    "batch_reason": "string",
-    "tool_calls": [
-        {{
-            "id": "step_1",
-            "tool_name": "get_session_summary" | "answer_about_document" | "inspect_document" | "locate_relevant_context" | "get_context_window" | "get_source_html" | "get_analysis_html",
-            "arguments": {{}},
-            "reason": "string"
-        }}
-    ]
-}}
+def _provider_supports_native_structured_output(provider: BaseProvider) -> bool:
+    try:
+        return bool(provider.supports_native_structured_output())
+    except Exception:
+        return False
 
-Backward-compatible single-tool schema:
-{{
-    "action": "call_tool",
-    "tool_name": "get_session_summary" | "answer_about_document" | "inspect_document" | "locate_relevant_context" | "get_context_window" | "get_source_html" | "get_analysis_html",
-    "arguments": {{}}
-}}
 
-Final response schema:
-{{
-    "action": "final",
-    "result_type": "answer" | "clarify" | "propose_edit",
-    "assistant_message": "string",
-    "summary": "short revision summary",
-    "operations": [
-        {{
-            "op": "REPLACE_TEXT_RANGE" | "INSERT_TEXT_AT" | "DELETE_TEXT_RANGE" | "APPLY_STYLE" | "APPLY_INLINE_FORMAT" | "SET_HEADING_LEVEL" | "CREATE_BLOCK" | "UPDATE_CELL_CONTENT" | "CHANGE_LIST_TYPE" | "CHANGE_LIST_LEVEL",
-            "target": {{
-                "block_id": "string",
-                "start": 0,
-                "end": 10,
-                "table_id": "string",
-                "row_id": "string",
-                "cell_id": "string",
-                "cell_logical_address": "R1C1"
-            }},
-            "value": {{}},
-            "description": "string"
-        }}
-    ],
-    "risks": ["string"],
-    "needs_review": true
-}}
-
-Tool argument guide:
-- get_session_summary: {{}}
-- answer_about_document: {{"question": "string"}}
-- inspect_document: {{"include_outline": true, "include_style_summary": true}}
-- locate_relevant_context: {{"query": "string"}}
-- get_context_window: {{"block_id": "string", "window_size": 2}}
-- get_source_html: {{}}
-- get_analysis_html: {{}}
-
-Execution budget and control:
-- Approximate max input tokens per LLM request: {execution_config['max_input_tokens']}
-- Approximate session-context budget before compaction: {execution_config['session_context_budget_tokens']}
-- Approximate tool-result budget per batch: {execution_config['tool_result_budget_tokens']}
-- Max tool calls in one batch: {execution_config['max_tool_batch_size']}
-- Max tools that may run in parallel: {execution_config['max_parallel_tools']}
-- Max heavy tools per turn: {execution_config['max_heavy_tools_per_turn']}
-
-Tool registry:
-{_tool_registry_prompt()}
-
-Rules:
-- Answer greetings and simple chat directly without tools.
-- Prefer cheaper tools first and only call tools when they materially help.
-- Use action="call_tools" when you want multiple tools in one loop step.
-- Use execution="parallel" only when every tool is independent and light.
-- Use execution="sequential" when later tools depend on earlier results, or any tool is medium or heavy.
-- Never batch more than one heavy tool.
-- If the executor rejects a batch, you will receive a Tool batch rejection message. Replan with fewer, cheaper, or ordered tools.
-- After each successful tool batch, you will receive a follow-up user message labeled Tool batch result with each step result.
-- The executor may compact older session history and tool results automatically to stay under the input budget.
-- For edits, gather explicit block ids or table or cell ids from tool results before propose_edit.
-- Never invent block ids, table ids, row ids, or cell ids.
-- Use result_type="clarify" when the request is ambiguous or unsafe to execute.
-- Use result_type="answer" when no document mutation is required.
-- Use result_type="propose_edit" only when you can target explicit ids from tool output or the current selection context.
-- Prefer the smallest operation set that satisfies the request.
-- Use snake_case target keys exactly as shown above.
-- For REPLACE_TEXT_RANGE and UPDATE_CELL_CONTENT, put the replacement text in value.text.
-- For APPLY_STYLE, use value.style_id.
-- For SET_HEADING_LEVEL or CHANGE_LIST_LEVEL, use value.level.
-- For CREATE_BLOCK, use value.type and value.text at minimum.
-- assistant_message must summarize what will be staged for review, or ask the clarifying question.
-- Reply in the same language as the user inside assistant_message.
-"""
+def _agent_request_mode(provider: BaseProvider) -> str:
+    return _AGENT_STRUCTURED_OUTPUT_MODE if _provider_supports_native_structured_output(provider) else _AGENT_PROMPT_OUTPUT_MODE
 
 
 def _filtered_history_messages(
@@ -308,13 +357,36 @@ def _compact_context_list(items: Any, *, max_items: int) -> tuple[list[Any], int
     return compact_items, omitted
 
 
+def _html_visible_text(html_content: str, max_chars: int = 6_000) -> str:
+    if not html_content:
+        return ""
+
+    normalized = html_content.replace("\r", "")
+    normalized = _HTML_NOISE_PATTERN.sub(" ", normalized)
+    normalized = _HTML_LIST_ITEM_PATTERN.sub("\n- ", normalized)
+    normalized = _HTML_BLOCK_BREAK_PATTERN.sub("\n", normalized)
+    normalized = _HTML_TAG_PATTERN.sub(" ", normalized)
+    normalized = html.unescape(normalized)
+    normalized = re.sub(r"[ \t\f\v]+", " ", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars - 16].rstrip()} ...[truncated]"
+
+
 def _compact_tool_result(tool_name: str, result: Any) -> Any:
     if tool_name in {"get_source_html", "get_analysis_html"}:
         text = result if isinstance(result, str) else str(result or "")
-        return {
+        compact_result: dict[str, Any] = {
             "content_length": len(text),
-            "excerpt": _html_excerpt(text, max_chars=6_000),
         }
+        visible_text = _html_visible_text(text, max_chars=5_000)
+        if visible_text:
+            compact_result["visible_text_excerpt"] = visible_text
+        else:
+            compact_result["html_excerpt"] = _html_excerpt(text, max_chars=6_000)
+        return compact_result
 
     if tool_name == "get_session_summary":
         return result
@@ -402,6 +474,21 @@ def _tool_result_message(tool_name: str, arguments: dict[str, Any], result: Any)
     )
 
 
+def _invalid_agent_response_message(reason: str) -> str:
+    return "\n\n".join(
+        part
+        for part in (
+            "Internal response error.",
+            _text_block("Reason", reason),
+            "The previous response was not executed.",
+            "Return exactly one top-level JSON object using one of the documented schemas.",
+            "Do not return nested partial objects, markdown fences, commentary, or trailing characters.",
+            "Continue the same turn.",
+        )
+        if part
+    )
+
+
 def _coerce_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -466,6 +553,12 @@ def _resolve_agent_execution_config(execution_config: dict[str, Any] | None) -> 
         minimum=1_200,
         maximum=200_000,
     )
+    max_output_tokens = _coerce_int(
+        raw.get("max_output_tokens") or raw.get("maxOutputTokens"),
+        settings.agent_max_output_tokens,
+        minimum=256,
+        maximum=_MAX_AGENT_REPAIR_OUTPUT_TOKENS,
+    )
     session_context_budget_tokens = _coerce_int(
         raw.get("session_context_budget_tokens") or raw.get("sessionContextBudgetTokens"),
         settings.agent_session_context_budget_tokens,
@@ -497,17 +590,30 @@ def _resolve_agent_execution_config(execution_config: dict[str, Any] | None) -> 
         maximum=max_tool_batch_size,
     )
 
+    # Only honor a client-sent "forceCompact" flag for explicit user-initiated compaction.
+    # Otherwise, use the backend-configured default `settings.agent_auto_compact_session`.
+    force_compact = _coerce_bool(raw.get("force_compact") or raw.get("forceCompact"), False)
+
+    # Respect an explicit client preference for auto-compaction when provided.
+    # If the client does not send a value, fall back to the server configuration.
+    client_auto_raw = raw.get("auto_compact_session") if "auto_compact_session" in raw else raw.get("autoCompactSession", None)
+    if client_auto_raw is not None:
+        client_auto = _coerce_bool(client_auto_raw, bool(settings.agent_auto_compact_session))
+    else:
+        client_auto = bool(settings.agent_auto_compact_session)
+
+    auto_compact_session = bool(client_auto) or bool(force_compact)
+
     return {
         "max_input_tokens": max_input_tokens,
+        "max_output_tokens": max_output_tokens,
         "session_context_budget_tokens": min(session_context_budget_tokens, max_input_tokens - 80),
         "tool_result_budget_tokens": min(tool_result_budget_tokens, max_input_tokens - 40),
         "max_tool_batch_size": max_tool_batch_size,
         "max_parallel_tools": min(max_parallel_tools, max_tool_batch_size),
         "max_heavy_tools_per_turn": max_heavy_tools_per_turn,
-        "auto_compact_session": _coerce_bool(
-            raw.get("auto_compact_session") or raw.get("autoCompactSession"),
-            settings.agent_auto_compact_session,
-        ),
+        # Use server config unless the client explicitly requests compaction for this turn.
+        "auto_compact_session": auto_compact_session,
         "auto_compact_threshold": _coerce_float(
             raw.get("auto_compact_threshold") or raw.get("autoCompactThreshold"),
             settings.agent_auto_compact_threshold,
@@ -656,12 +762,34 @@ def _operations_have_explicit_targets(operations: list[dict[str, Any]]) -> bool:
     if not operations:
         return False
 
-    target_keys = {"block_id", "table_id", "row_id", "cell_id", "cell_logical_address"}
     for operation in operations:
         target = operation.get("target")
         if not isinstance(target, dict):
             return False
-        if not any(str(target.get(key) or "").strip() for key in target_keys):
+        if not any(str(target.get(key) or "").strip() for key in _TARGET_REFERENCE_KEYS):
+            return False
+    return True
+
+
+def _operations_reference_known_targets(operations: list[dict[str, Any]], trusted_values: set[str]) -> bool:
+    if not operations or not trusted_values:
+        return False
+
+    for operation in operations:
+        target = operation.get("target")
+        if not isinstance(target, dict):
+            return False
+
+        has_reference = False
+        for key in _TARGET_REFERENCE_KEYS:
+            normalized = str(target.get(key) or "").strip()
+            if not normalized:
+                continue
+            has_reference = True
+            if normalized not in trusted_values:
+                return False
+
+        if not has_reference:
             return False
     return True
 
@@ -688,6 +816,61 @@ def _tool_finished(tool: str, **payload: Any) -> tuple[str, dict[str, Any]]:
     data = {"tool": tool}
     data.update(payload)
     return "tool_finished", data
+
+
+def _provider_stream_parts(chunk: Any) -> tuple[str, str]:
+    if isinstance(chunk, str):
+        return chunk, ""
+
+    if isinstance(chunk, dict):
+        content = str(chunk.get("content") or "")
+        reasoning = str(chunk.get("reasoning") or "")
+        return content, reasoning
+
+    return "", ""
+
+
+def _llm_max_output_tokens(execution_policy: dict[str, Any], *, repair_attempts: int = 0) -> int:
+    base = _coerce_int(
+        execution_policy.get("max_output_tokens"),
+        settings.agent_max_output_tokens,
+        minimum=256,
+        maximum=_MAX_AGENT_REPAIR_OUTPUT_TOKENS,
+    )
+    multiplier = 1 << max(0, min(repair_attempts, 2))
+    return min(base * multiplier, _MAX_AGENT_REPAIR_OUTPUT_TOKENS)
+
+
+def _empty_visible_response_reason(*, expects_json: bool, reasoning_text: str) -> str:
+    if reasoning_text:
+        follow_up = (
+            "Return exactly one top-level JSON object immediately."
+            if expects_json
+            else "Reply to the user directly in plain text immediately."
+        )
+        return (
+            "The previous response produced internal reasoning but no visible content. "
+            f"{follow_up} Do not spend tokens on hidden reasoning, commentary, or partial output."
+        )
+
+    if expects_json:
+        return "The previous response was empty. Return exactly one top-level JSON object immediately."
+    return "The previous response was empty. Reply to the user directly in plain text immediately."
+
+
+def _invalid_ask_response_message(reason: str) -> str:
+    return "\n\n".join(
+        part
+        for part in (
+            "Internal response error.",
+            _text_block("Reason", reason),
+            "The previous response was not shown to the user.",
+            "Reply to the user directly in plain text.",
+            "Do not return JSON, markdown fences, or internal reasoning.",
+            "Continue the same turn.",
+        )
+        if part
+    )
 
 
 def _estimate_token_count(text: str) -> int:
@@ -768,6 +951,61 @@ def _summarize_llm_requests(requests: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _normalized_revision_status(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _llm_request_purpose(action_payload: dict[str, Any]) -> str:
+    action = str(action_payload.get("action") or "").strip().lower()
+    if action in {"call_tool", "call_tools"}:
+        batch_plan = _normalize_tool_batch_plan(action_payload)
+        batch_reason = str(batch_plan.get("batch_reason") or "").strip()
+        if batch_reason:
+            return batch_reason
+
+        tool_calls = batch_plan.get("tool_calls") if isinstance(batch_plan.get("tool_calls"), list) else []
+        if len(tool_calls) == 1:
+            first_reason = str(tool_calls[0].get("reason") or "").strip()
+            if first_reason:
+                return first_reason
+
+            tool_name = str(tool_calls[0].get("tool_name") or "").strip()
+            if tool_name:
+                return f"Run {tool_name}"
+
+        return "Plan and execute tool calls"
+
+    if action == "final":
+        result_type = str(action_payload.get("result_type") or "").strip().lower()
+        if result_type == "propose_edit":
+            return "Prepare revision proposal"
+        if result_type == "clarify":
+            return "Ask clarifying question"
+        return "Compose final answer"
+
+    return "Reason about next step"
+
+
+def _revision_stage_failure_message(assistant_message: str, proposal_status: str, validation_errors: list[str]) -> str:
+    detail = validation_errors[0] if validation_errors else ""
+    if not detail and proposal_status and proposal_status != "PENDING":
+        detail = f"Revision status was {proposal_status}."
+
+    if _assistant_message_claims_completed_edit(assistant_message):
+        return _honest_unstaged_edit_message(detail)
+
+    note = "Revision staging failed, so no reviewable revision was created."
+    if detail:
+        note = f"{note} {detail}"
+
+    stripped = assistant_message.strip()
+    if not stripped:
+        return note
+    if note in stripped:
+        return stripped
+    return f"{stripped}\n\n{note}"
+
+
 def _chunk_text(text: str, chunk_size: int = 220) -> list[str]:
     stripped = text.strip()
     if not stripped:
@@ -791,6 +1029,41 @@ def _clean_candidate_text(value: str) -> str:
     return cleaned.strip(" \t\r\n\"'“”‘’`.,;:()[]{}")
 
 
+def _candidate_query_variants(value: str) -> list[str]:
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add_variant(candidate: str) -> None:
+        cleaned = _clean_candidate_text(candidate)
+        if len(cleaned) < 3:
+            return
+        normalized = cleaned.casefold()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        variants.append(cleaned)
+
+    cleaned = _clean_candidate_text(value)
+    if not cleaned:
+        return variants
+
+    add_variant(cleaned)
+    if ":" in cleaned:
+        add_variant(cleaned.split(":", 1)[1])
+
+    stripped_label = _LEADING_EDIT_LABEL_PATTERN.sub("", cleaned)
+    if stripped_label != cleaned:
+        add_variant(stripped_label)
+
+    token_source = stripped_label if stripped_label != cleaned else cleaned
+    tokens = [token for token in token_source.split() if token]
+    max_suffix_size = min(3, len(tokens))
+    for suffix_size in range(max_suffix_size, 0, -1):
+        add_variant(" ".join(tokens[-suffix_size:]))
+
+    return variants
+
+
 def _extract_edit_search_candidates(prompt: str) -> list[dict[str, str]]:
     candidates: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -809,15 +1082,68 @@ def _extract_edit_search_candidates(prompt: str) -> list[dict[str, str]]:
     if rewrite_match:
         source_text = rewrite_match.group("source") or ""
         section_hint = rewrite_match.group("section") or ""
-        add_candidate("source_text", source_text)
-        if ":" in source_text:
-            add_candidate("source_value", source_text.split(":", 1)[1])
+        for index, variant in enumerate(_candidate_query_variants(source_text)):
+            add_candidate("source_text" if index == 0 else "source_focus", variant)
         add_candidate("section_hint", section_hint)
 
     for quoted in _QUOTED_TEXT_PATTERN.findall(prompt or ""):
-        add_candidate("quoted_text", quoted)
+        for index, variant in enumerate(_candidate_query_variants(quoted)):
+            add_candidate("quoted_text" if index == 0 else "quoted_focus", variant)
 
-    return candidates[:6]
+    return candidates[:8]
+
+
+def _prompt_requests_document_edit(prompt: str) -> bool:
+    if not str(prompt or "").strip():
+        return False
+    return bool(_EDIT_REWRITE_PATTERN.search(prompt) or _EDIT_INTENT_PATTERN.search(prompt))
+
+
+def _assistant_message_claims_completed_edit(message: str) -> bool:
+    return bool(str(message or "").strip() and _EDIT_COMPLETION_CLAIM_PATTERN.search(message or ""))
+
+
+def _assistant_message_signals_edit_blocker(message: str) -> bool:
+    return bool(str(message or "").strip() and _EDIT_BLOCKER_PATTERN.search(message or ""))
+
+
+def _honest_unstaged_edit_message(detail: str = "") -> str:
+    base = "No document change was staged or applied in this turn."
+    if detail:
+        return f"{base} {detail}"
+    return base
+
+
+def _edit_followthrough_message(*, has_trusted_targets: bool) -> str:
+    target_hint = (
+        "You already have trusted document targets in this turn, so continue from those ids and stage the revision now."
+        if has_trusted_targets
+        else "If you still need targets, call more tools now and then stage the revision in this same turn."
+    )
+    return "\n\n".join(
+        (
+            "The user asked you to edit the document, but your previous final response did not stage any revision.",
+            target_hint,
+            "Continue the same turn now. Either return result_type=\"propose_edit\" with explicit operations and trusted target ids, or return result_type=\"clarify\" and state the blocker clearly.",
+            "Do not claim that the document was updated, fixed, changed, or applied unless a revision is actually staged in this turn.",
+        )
+    )
+
+
+def _should_force_edit_followthrough(
+    prompt: str,
+    result_type: str,
+    assistant_message: str,
+    *,
+    has_any_trusted_targets: bool,
+) -> bool:
+    if result_type == "propose_edit" or not _prompt_requests_document_edit(prompt):
+        return False
+    if _assistant_message_signals_edit_blocker(assistant_message):
+        return False
+    if _assistant_message_claims_completed_edit(assistant_message):
+        return True
+    return result_type == "answer" and has_any_trusted_targets
 
 
 def _has_answer_snippets(answer_context: Any) -> bool:
@@ -860,6 +1186,33 @@ def _collect_match_block_ids(context: Any) -> list[str]:
             seen.add(block_id)
             block_ids.append(block_id)
     return block_ids
+
+
+_TARGET_REFERENCE_KEYS = {"block_id", "table_id", "row_id", "cell_id", "cell_logical_address"}
+_TARGET_REFERENCE_KEYS_WITH_ALIASES = _TARGET_REFERENCE_KEYS | {
+    "blockId",
+    "tableId",
+    "rowId",
+    "cellId",
+    "cellLogicalAddress",
+}
+
+
+def _collect_trusted_target_values(payload: Any, trusted_values: set[str]) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in _TARGET_REFERENCE_KEYS_WITH_ALIASES:
+                normalized = str(value or "").strip()
+                if normalized:
+                    trusted_values.add(normalized)
+                continue
+            if isinstance(value, (dict, list)):
+                _collect_trusted_target_values(value, trusted_values)
+        return
+
+    if isinstance(payload, list):
+        for item in payload:
+            _collect_trusted_target_values(item, trusted_values)
 
 
 def _html_excerpt(html: str, max_chars: int = 12_000) -> str:
@@ -932,12 +1285,42 @@ def _extract_json_objects(text: str) -> list[dict[str, Any]]:
     return objects
 
 
+def _looks_like_plain_answer(text: str) -> bool:
+    """Heuristic: return True when the model output appears to be a short human-facing
+    plain-text answer (not JSON, not code, not a heavy document). Used as a fallback
+    when the model did not return a structured JSON object.
+    """
+    if not text:
+        return False
+    s = str(text).strip()
+    if not s:
+        return False
+    # Reject obvious JSON or code fences
+    if s.startswith("```") or "```" in s:
+        return False
+    if s.startswith("{") or s.startswith("[") or "\n{" in s:
+        return False
+    # If it contains JSON schema markers, do not treat as plain
+    lowered = s.lower()
+    if '"action"' in lowered or 'result_type' in lowered or 'assistant_message' in lowered:
+        return False
+    # Too long or multi-line -> likely not a simple answer
+    if len(s) > 4000:
+        return False
+    if s.count("\n") > 8:
+        return False
+    # Reject token-like garbage such as sentinel strings or schema failures.
+    if len(s.split()) < 2 and not re.search(r"[.!?。！？]$", s):
+        return False
+    return True
+
+
 def _select_agent_action(action_payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
     for payload in action_payloads:
         action = str(payload.get("action") or "").strip().lower()
         if action in {"call_tool", "call_tools", "final"}:
             return payload
-    return action_payloads[0] if action_payloads else None
+    return None
 
 
 def _normalize_tool_batch_plan(action_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1297,6 +1680,131 @@ async def _load_context_windows_for_blocks(
     return events, windows
 
 
+async def _attempt_edit_target_recovery(
+    client: DocMcpClient,
+    document_session_id: str,
+    prompt: str,
+    attempted_queries: set[str],
+    trusted_target_values: set[str],
+    execution_config: dict[str, Any],
+    *,
+    intro_message: str | None = None,
+) -> tuple[list[tuple[str, Any]], str | None]:
+    candidates = [
+        candidate
+        for candidate in _extract_edit_search_candidates(prompt)
+        if candidate["query"] not in attempted_queries
+    ]
+    if not candidates:
+        return [], None
+
+    events: list[tuple[str, Any]] = []
+    step_results: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    resolved_block_ids: list[str] = []
+    seen_block_ids: set[str] = set()
+
+    for candidate in candidates[:3]:
+        query = candidate["query"]
+        attempted_queries.add(query)
+        step_id = f"recovery_{len(step_results) + 1}"
+        reason = f"Recover explicit document targets from the literal edit phrase ({candidate['label']})."
+        tool_calls.append(
+            {
+                "id": step_id,
+                "tool_name": "locate_relevant_context",
+                "arguments": {"query": query},
+                "reason": reason,
+            }
+        )
+        locate_events, relevant_context = await _locate_relevant_context(
+            client,
+            document_session_id,
+            query,
+            phase=_RECOVER_EDIT_TARGETS_PHASE,
+        )
+        events.extend(locate_events)
+        context_result = relevant_context if isinstance(relevant_context, dict) else {}
+        _collect_trusted_target_values(context_result, trusted_target_values)
+        step_results.append(
+            {
+                "id": step_id,
+                "tool_name": "locate_relevant_context",
+                "arguments": {"query": query},
+                "reason": reason,
+                "tier": _AGENT_TOOL_SPECS["locate_relevant_context"]["tier"],
+                "result": context_result,
+            }
+        )
+
+        for block_id in _collect_match_block_ids(context_result):
+            if block_id in seen_block_ids:
+                continue
+            seen_block_ids.add(block_id)
+            resolved_block_ids.append(block_id)
+
+        if resolved_block_ids:
+            break
+
+    if resolved_block_ids:
+        window_events, windows = await _load_context_windows_for_blocks(
+            client,
+            document_session_id,
+            resolved_block_ids,
+            phase=_RECOVER_EDIT_TARGETS_PHASE,
+        )
+        events.extend(window_events)
+        for window in windows:
+            block_id = str(window.get("block_id") or "").strip()
+            if not block_id:
+                continue
+            _collect_trusted_target_values(window, trusted_target_values)
+            step_id = f"recovery_{len(step_results) + 1}"
+            reason = "Inspect surrounding document blocks for trusted edit targets."
+            tool_calls.append(
+                {
+                    "id": step_id,
+                    "tool_name": "get_context_window",
+                    "arguments": {"block_id": block_id, "window_size": 2},
+                    "reason": reason,
+                }
+            )
+            step_results.append(
+                {
+                    "id": step_id,
+                    "tool_name": "get_context_window",
+                    "arguments": {"block_id": block_id, "window_size": 2},
+                    "reason": reason,
+                    "tier": _AGENT_TOOL_SPECS["get_context_window"]["tier"],
+                    "result": window,
+                }
+            )
+
+    if not step_results:
+        return events, None
+
+    batch_plan = {
+        "execution": "sequential",
+        "batch_reason": "Recover explicit edit targets before staging the revision",
+        "tool_calls": tool_calls,
+    }
+    validation = {
+        "autoRecovery": True,
+        "resolvedBlockCount": len(resolved_block_ids),
+        "projected_next_input_tokens": 0,
+    }
+    recovery_message = "\n\n".join(
+        part
+        for part in (
+            intro_message or "The previous proposed edit was not executed because its target ids were missing or unresolved.",
+            "Use only the explicit block, table, row, or cell ids from the recovery results below. If the results are still insufficient, return result_type=\"clarify\" or result_type=\"answer\" and do not propose an edit.",
+            _tool_batch_result_message(batch_plan, step_results, validation, execution_config),
+        )
+        if part
+    )
+    return events, recovery_message
+
+
 async def _execute_agent_tool_call(
     client: DocMcpClient,
     document_session_id: str,
@@ -1435,6 +1943,7 @@ async def _execute_agent_tool_batch(
         "phase": _AGENT_LOOP_PHASE,
         "execution": execution,
         "toolCount": len(tool_calls),
+        "batchReason": str(batch_plan.get("batch_reason") or "").strip() or None,
     }
 
     events: list[tuple[str, Any]] = [_tool_started(_TOOL_BATCH_EVENT, **batch_event_payload)]
@@ -1628,64 +2137,149 @@ async def stream_turn(
             providerModel=getattr(provider, "default_model", None),
             messages=messages,
         )
-        llm_request_index = 1
-        llm_request_started = _build_llm_request_metrics(
-            request_index=llm_request_index,
-            phase="compose_answer",
-            provider=provider,
-            messages=messages,
-            output_text="",
-        )
-        llm_request_started["maxInputTokens"] = execution_policy["max_input_tokens"]
-        if compaction_info:
-            llm_request_started["compactedInput"] = True
-        yield _tool_started("llm_inference", **llm_request_started)
-        assistant_chunks: list[str] = []
-        async for chunk in provider.stream_chat(messages):
-            if not chunk:
+        ask_messages = list(messages)
+        ask_invalid_response_repairs = 0
+        ask_llm_requests: list[dict[str, Any]] = []
+        while True:
+            llm_request_index = len(ask_llm_requests) + 1
+            max_output_tokens = _llm_max_output_tokens(
+                execution_policy,
+                repair_attempts=ask_invalid_response_repairs,
+            )
+            llm_request_started = _build_llm_request_metrics(
+                request_index=llm_request_index,
+                phase="compose_answer",
+                provider=provider,
+                messages=ask_messages,
+                output_text="",
+            )
+            llm_request_started["requestPurpose"] = "Compose final answer"
+            llm_request_started["maxInputTokens"] = execution_policy["max_input_tokens"]
+            llm_request_started["maxOutputTokens"] = max_output_tokens
+            if compaction_info:
+                llm_request_started["compactedInput"] = True
+            yield _tool_started("llm_inference", **llm_request_started)
+
+            assistant_chunks: list[str] = []
+            reasoning_chunks: list[str] = []
+            async for chunk in provider.stream_chat(ask_messages, max_tokens=max_output_tokens):
+                content_chunk, reasoning_chunk = _provider_stream_parts(chunk)
+                if reasoning_chunk:
+                    reasoning_chunks.append(reasoning_chunk)
+                    yield (
+                        "reasoning_delta",
+                        {
+                            "tool": "llm_inference",
+                            "requestIndex": llm_request_index,
+                            "phase": "compose_answer",
+                            "reasoningDelta": reasoning_chunk,
+                            "reasoningChunkCount": len(reasoning_chunks),
+                        },
+                    )
+                if not content_chunk:
+                    continue
+                assistant_chunks.append(content_chunk)
+                yield "assistant_delta", content_chunk
+
+            assistant_text = "".join(assistant_chunks)
+            reasoning_text = "".join(reasoning_chunks).strip()
+            log_core_event(
+                "agent.llm.response",
+                phase="compose_answer",
+                mode=mode,
+                documentSessionId=document_session_id,
+                output=assistant_text,
+                reasoningOutput=reasoning_text or None,
+            )
+            llm_request = _build_llm_request_metrics(
+                request_index=llm_request_index,
+                phase="compose_answer",
+                provider=provider,
+                messages=ask_messages,
+                output_text=assistant_text,
+            )
+            llm_request["requestPurpose"] = "Compose final answer"
+            llm_request["maxInputTokens"] = execution_policy["max_input_tokens"]
+            llm_request["maxOutputTokens"] = max_output_tokens
+            if compaction_info:
+                llm_request["compactedInput"] = True
+            ask_llm_requests.append(llm_request)
+            yield _tool_finished(
+                "llm_inference",
+                chunkCount=len(assistant_chunks),
+                charCount=len(assistant_text),
+                reasoningChunkCount=len(reasoning_chunks),
+                reasoningCharCount=len(reasoning_text),
+                reasoningText=reasoning_text or None,
+                **llm_request,
+            )
+
+            if assistant_text.strip():
+                yield (
+                    "done",
+                    {
+                        "message": assistant_text,
+                        "mode": mode,
+                        "intent": intent,
+                        "resultType": "answer",
+                        "documentSessionId": document_session_id,
+                        "baseRevisionId": effective_base_revision_id or None,
+                        "revisionId": None,
+                        "status": "completed",
+                        "notices": ask_notices or None,
+                        "usage": _summarize_llm_requests(ask_llm_requests),
+                    },
+                )
+                return
+
+            reason = _empty_visible_response_reason(
+                expects_json=False,
+                reasoning_text=reasoning_text,
+            )
+            log_core_event(
+                "agent.llm.invalid_response",
+                phase="compose_answer",
+                mode=mode,
+                documentSessionId=document_session_id,
+                reason=reason,
+                emptyVisibleOutput=True,
+                hadReasoning=bool(reasoning_text),
+                repairAttempt=ask_invalid_response_repairs + 1,
+                maxRepairAttempts=_MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS,
+            )
+            if ask_invalid_response_repairs < _MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS:
+                ask_invalid_response_repairs += 1
+                ask_messages.append(
+                    {
+                        "role": "user",
+                        "content": _invalid_ask_response_message(reason),
+                    }
+                )
                 continue
-            assistant_chunks.append(chunk)
-            yield "assistant_delta", chunk
-        assistant_text = "".join(assistant_chunks)
-        log_core_event(
-            "agent.llm.response",
-            phase="compose_answer",
-            mode=mode,
-            documentSessionId=document_session_id,
-            output=assistant_text,
-        )
-        llm_request = _build_llm_request_metrics(
-            request_index=llm_request_index,
-            phase="compose_answer",
-            provider=provider,
-            messages=messages,
-            output_text=assistant_text,
-        )
-        llm_request["maxInputTokens"] = execution_policy["max_input_tokens"]
-        if compaction_info:
-            llm_request["compactedInput"] = True
-        yield _tool_finished(
-            "llm_inference",
-            chunkCount=len(assistant_chunks),
-            charCount=len(assistant_text),
-            **llm_request,
-        )
-        yield (
-            "done",
-            {
-                "message": assistant_text,
-                "mode": mode,
-                "intent": intent,
-                "resultType": "answer",
-                "documentSessionId": document_session_id,
-                "baseRevisionId": effective_base_revision_id or None,
-                "revisionId": None,
-                "status": "completed",
-                "notices": ask_notices or None,
-                "usage": _summarize_llm_requests([llm_request]),
-            },
-        )
-        return
+
+            error_message = "The assistant did not return a visible response. Please try again."
+            ask_notices.append(
+                {
+                    "code": "assistant_empty_output",
+                    "message": error_message,
+                }
+            )
+            yield (
+                "done",
+                {
+                    "message": error_message,
+                    "mode": mode,
+                    "intent": intent,
+                    "resultType": "answer",
+                    "documentSessionId": document_session_id,
+                    "baseRevisionId": effective_base_revision_id or None,
+                    "revisionId": None,
+                    "status": "failed",
+                    "notices": ask_notices or None,
+                    "usage": _summarize_llm_requests(ask_llm_requests),
+                },
+            )
+            return
 
     llm_requests: list[dict[str, Any]] = []
     loop_transcript: list[dict[str, str]] = []
@@ -1693,9 +2287,16 @@ async def stream_turn(
     current_revision_id: str | None = None
     tool_usage_counts: dict[str, int] = {}
     heavy_tool_calls_used = 0
+    invalid_response_repairs = 0
+    edit_followthrough_repairs = 0
+    trusted_target_values: set[str] = set()
+    attempted_target_recovery_queries: set[str] = set()
+    _collect_trusted_target_values(selection, trusted_target_values)
 
-    for llm_request_index in range(1, _MAX_AGENT_LOOP_STEPS + 1):
-        system_prompt = _build_agent_system_prompt(execution_policy)
+    for llm_request_index in itertools.count(1):
+        requested_output_mode = _agent_request_mode(provider)
+        effective_output_mode = requested_output_mode
+        system_prompt = _build_agent_system_prompt(execution_policy, request_mode=effective_output_mode)
         planning_messages = _build_agent_loop_messages(
             system_prompt,
             prompt,
@@ -1733,6 +2334,8 @@ async def stream_turn(
             documentSessionId=document_session_id,
             providerClass=provider.__class__.__name__,
             providerModel=getattr(provider, "default_model", None),
+            structuredOutputMode=effective_output_mode,
+            nativeStructuredOutputRequested=effective_output_mode == _AGENT_STRUCTURED_OUTPUT_MODE,
             messages=planning_messages,
         )
         llm_request_started = _build_llm_request_metrics(
@@ -1742,22 +2345,82 @@ async def stream_turn(
             messages=planning_messages,
             output_text="",
         )
+        max_output_tokens = _llm_max_output_tokens(
+            execution_policy,
+            repair_attempts=invalid_response_repairs,
+        )
+        llm_request_started["requestPurpose"] = "Reason about next step"
         llm_request_started["maxInputTokens"] = execution_policy["max_input_tokens"]
+        llm_request_started["maxOutputTokens"] = max_output_tokens
+        llm_request_started["structuredOutputMode"] = effective_output_mode
+        llm_request_started["requestedStructuredOutputMode"] = requested_output_mode
+        if effective_output_mode == _AGENT_STRUCTURED_OUTPUT_MODE:
+            llm_request_started["responseFormat"] = "json_schema"
         if compaction_info:
             llm_request_started["compactedInput"] = True
         yield _tool_started("llm_inference", **llm_request_started)
 
         model_chunks: list[str] = []
-        async for chunk in provider.stream_chat(planning_messages):
-            if chunk:
-                model_chunks.append(chunk)
+        reasoning_chunks: list[str] = []
+        structured_output_fallback = False
+        while True:
+            response_format = _AGENT_RESPONSE_FORMAT if effective_output_mode == _AGENT_STRUCTURED_OUTPUT_MODE else None
+            try:
+                async for chunk in provider.stream_chat(
+                    planning_messages,
+                    response_format=response_format,
+                    max_tokens=max_output_tokens,
+                ):
+                    content_chunk, reasoning_chunk = _provider_stream_parts(chunk)
+                    if reasoning_chunk:
+                        reasoning_chunks.append(reasoning_chunk)
+                        yield (
+                            "reasoning_delta",
+                            {
+                                "tool": "llm_inference",
+                                "requestIndex": llm_request_index,
+                                "phase": _AGENT_LOOP_PHASE,
+                                "reasoningDelta": reasoning_chunk,
+                                "reasoningChunkCount": len(reasoning_chunks),
+                            },
+                        )
+                    if content_chunk:
+                        model_chunks.append(content_chunk)
+                break
+            except StructuredOutputNotSupportedError as exc:
+                if effective_output_mode != _AGENT_STRUCTURED_OUTPUT_MODE:
+                    raise
+                structured_output_fallback = True
+                effective_output_mode = _AGENT_PROMPT_OUTPUT_MODE
+                model_chunks = []
+                reasoning_chunks = []
+                planning_messages = [
+                    {"role": "system", "content": _build_agent_system_prompt(execution_policy, request_mode=effective_output_mode)},
+                    *planning_messages[1:],
+                ]
+                log_core_event(
+                    "agent.llm.structured_output_fallback",
+                    phase=_AGENT_LOOP_PHASE,
+                    mode=mode,
+                    documentSessionId=document_session_id,
+                    providerClass=provider.__class__.__name__,
+                    providerModel=getattr(provider, "default_model", None),
+                    requestedStructuredOutputMode=requested_output_mode,
+                    fallbackStructuredOutputMode=effective_output_mode,
+                    reason=str(exc),
+                )
+                continue
         model_output = "".join(model_chunks)
+        reasoning_text = "".join(reasoning_chunks).strip()
         log_core_event(
             "agent.llm.response",
             phase=_AGENT_LOOP_PHASE,
             mode=mode,
             documentSessionId=document_session_id,
+            structuredOutputMode=effective_output_mode,
+            structuredOutputFallback=structured_output_fallback,
             output=model_output,
+            reasoningOutput=reasoning_text or None,
         )
         llm_request = _build_llm_request_metrics(
             request_index=llm_request_index,
@@ -1766,7 +2429,14 @@ async def stream_turn(
             messages=planning_messages,
             output_text=model_output,
         )
+        llm_request["requestPurpose"] = "Reason about next step"
         llm_request["maxInputTokens"] = execution_policy["max_input_tokens"]
+        llm_request["maxOutputTokens"] = max_output_tokens
+        llm_request["structuredOutputMode"] = effective_output_mode
+        llm_request["requestedStructuredOutputMode"] = requested_output_mode
+        llm_request["structuredOutputFallback"] = structured_output_fallback
+        if effective_output_mode == _AGENT_STRUCTURED_OUTPUT_MODE:
+            llm_request["responseFormat"] = "json_schema"
         if compaction_info:
             llm_request["compactedInput"] = True
         llm_requests.append(llm_request)
@@ -1774,15 +2444,135 @@ async def stream_turn(
             "llm_inference",
             chunkCount=len(model_chunks),
             charCount=len(model_output),
+            reasoningChunkCount=len(reasoning_chunks),
+            reasoningCharCount=len(reasoning_text),
+            reasoningText=reasoning_text or None,
             **llm_request,
         )
 
         action_payloads = _extract_json_objects(model_output)
         action_payload = _select_agent_action(action_payloads)
+        # Fallback: if the model did not return JSON but the output looks like
+        # a simple plain-text answer, accept it as the final assistant message
+        # instead of forcing a JSON repair round-trip.
+        if not action_payload and _looks_like_plain_answer(model_output):
+            final_message = str(model_output).strip()
+            final_result_type = "answer"
+            log_core_event(
+                "agent.llm.plain_response_fallback",
+                phase=_AGENT_LOOP_PHASE,
+                mode=mode,
+                documentSessionId=document_session_id,
+                note="Accepted plain-text model output as final answer",
+                outputSample=final_message[:1024],
+            )
+            for chunk in _chunk_text(final_message):
+                yield "assistant_delta", chunk
+            yield (
+                "done",
+                {
+                    "message": final_message,
+                    "mode": mode,
+                    "intent": intent,
+                    "resultType": final_result_type,
+                    "documentSessionId": document_session_id,
+                    "baseRevisionId": base_revision_id or current_revision_id or None,
+                    "revisionId": None,
+                    "status": "completed",
+                    "notices": notices or None,
+                    "usage": _summarize_llm_requests(llm_requests),
+                },
+            )
+            return
         if not action_payload:
+            if not str(model_output or "").strip():
+                reason = _empty_visible_response_reason(
+                    expects_json=True,
+                    reasoning_text=reasoning_text,
+                )
+                log_core_event(
+                    "agent.llm.invalid_response",
+                    phase=_AGENT_LOOP_PHASE,
+                    mode=mode,
+                    documentSessionId=document_session_id,
+                    reason=reason,
+                    emptyVisibleOutput=True,
+                    hadReasoning=bool(reasoning_text),
+                    repairAttempt=invalid_response_repairs + 1,
+                    maxRepairAttempts=_MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS,
+                )
+                if invalid_response_repairs < _MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS:
+                    invalid_response_repairs += 1
+                    loop_transcript.append(
+                        {
+                            "role": "user",
+                            "content": _invalid_agent_response_message(reason),
+                        }
+                    )
+                    continue
+                error_message = "The assistant returned an invalid internal response. Please try again."
+                notices.append(
+                    {
+                        "code": "agent_empty_output",
+                        "message": error_message,
+                    }
+                )
+                yield (
+                    "done",
+                    {
+                        "message": error_message,
+                        "mode": mode,
+                        "intent": intent,
+                        "resultType": "answer",
+                        "documentSessionId": document_session_id,
+                        "baseRevisionId": base_revision_id or current_revision_id or None,
+                        "revisionId": None,
+                        "status": "failed",
+                        "notices": notices or None,
+                        "usage": _summarize_llm_requests(llm_requests),
+                    },
+                )
+                return
+
+            extracted_actions = sorted(
+                {
+                    str(payload.get("action") or "").strip().lower()
+                    for payload in action_payloads
+                    if isinstance(payload, dict) and str(payload.get("action") or "").strip()
+                }
+            )
+            if action_payloads:
+                reason = (
+                    "The previous response used unsupported action values: "
+                    + ", ".join(extracted_actions)
+                    + '. Use only "call_tool", "call_tools", or "final".'
+                ) if extracted_actions else (
+                    "The previous response did not contain a valid top-level JSON object with an `action` field. "
+                    "Do not return nested partial objects or trailing characters."
+                )
+                log_core_event(
+                    "agent.llm.invalid_response",
+                    phase=_AGENT_LOOP_PHASE,
+                    mode=mode,
+                    documentSessionId=document_session_id,
+                    reason=reason,
+                    extractedPayloadCount=len(action_payloads),
+                    extractedActions=extracted_actions or None,
+                    repairAttempt=invalid_response_repairs + 1,
+                    maxRepairAttempts=_MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS,
+                )
+                if invalid_response_repairs < _MAX_AGENT_RESPONSE_REPAIR_ATTEMPTS:
+                    invalid_response_repairs += 1
+                    loop_transcript.append(
+                        {
+                            "role": "user",
+                            "content": _invalid_agent_response_message(reason),
+                        }
+                    )
+                    continue
             error_message = "The assistant returned an invalid internal response. Please try again."
             notices.append({
-                "code": "agent_invalid_json",
+                "code": "agent_invalid_action" if extracted_actions else "agent_invalid_json",
                 "message": error_message,
             })
             yield (
@@ -1802,6 +2592,9 @@ async def stream_turn(
             )
             return
 
+        invalid_response_repairs = 0
+        llm_request["requestPurpose"] = _llm_request_purpose(action_payload)
+
         if len(action_payloads) > 1:
             log_core_event(
                 "agent.llm.multiple_actions",
@@ -1811,7 +2604,7 @@ async def stream_turn(
                 chosenAction=str(action_payload.get("action") or ""),
             )
 
-        action = str(action_payload.get("action") or "final").strip().lower()
+        action = str(action_payload.get("action") or "").strip().lower()
         if action not in {"call_tool", "call_tools", "final"}:
             error_message = "The assistant returned an invalid internal response. Please try again."
             notices.append({
@@ -1873,6 +2666,11 @@ async def stream_turn(
 
             heavy_tool_calls_used += _increment_tool_usage_counts(tool_usage_counts, batch_plan["tool_calls"])
             for step in step_results:
+                if step["tool_name"] == "locate_relevant_context":
+                    query = str((step.get("arguments") or {}).get("query") or "").strip()
+                    if query:
+                        attempted_target_recovery_queries.add(query)
+                _collect_trusted_target_values(step.get("result"), trusted_target_values)
                 if step["tool_name"] == "get_session_summary" and isinstance(step["result"], dict):
                     current_revision_id = str(step["result"].get("current_revision_id") or "").strip() or current_revision_id
 
@@ -1899,12 +2697,101 @@ async def stream_turn(
         if isinstance(action_payload.get("risks"), list) and action_payload["risks"]:
             notices.append({"code": "agent_risks", "items": action_payload["risks"]})
 
-        if result_type != "propose_edit" or not operations or not _operations_have_explicit_targets(operations):
-            if result_type == "propose_edit" and (not operations or not _operations_have_explicit_targets(operations)):
-                notices.append({
-                    "code": "agent_missing_targets",
-                    "items": ["The model proposed an edit without explicit document target ids, so no revision was staged."],
-                })
+        has_explicit_targets = _operations_have_explicit_targets(operations)
+        has_trusted_targets = _operations_reference_known_targets(operations, trusted_target_values)
+        has_any_trusted_targets = bool(trusted_target_values)
+        prompt_requests_edit = _prompt_requests_document_edit(prompt)
+
+        if result_type == "propose_edit" and (not has_explicit_targets or not has_trusted_targets):
+            recovery_events, recovery_message = await _attempt_edit_target_recovery(
+                client,
+                document_session_id,
+                prompt,
+                attempted_target_recovery_queries,
+                trusted_target_values,
+                execution_policy,
+            )
+            if recovery_message:
+                loop_transcript.append({"role": "assistant", "content": json.dumps(action_payload, ensure_ascii=False)})
+                for event in recovery_events:
+                    yield event
+                loop_transcript.append({"role": "user", "content": recovery_message})
+                continue
+
+        if result_type != "propose_edit" and prompt_requests_edit and not has_any_trusted_targets:
+            recovery_events, recovery_message = await _attempt_edit_target_recovery(
+                client,
+                document_session_id,
+                prompt,
+                attempted_target_recovery_queries,
+                trusted_target_values,
+                execution_policy,
+                intro_message=(
+                    "The user asked for an edit in this turn. Recover explicit document targets from the current request before deciding whether the revision can be staged."
+                ),
+            )
+            if recovery_message:
+                loop_transcript.append({"role": "assistant", "content": json.dumps(action_payload, ensure_ascii=False)})
+                for event in recovery_events:
+                    yield event
+                loop_transcript.append({"role": "user", "content": recovery_message})
+                continue
+
+        if (
+            _should_force_edit_followthrough(
+                prompt,
+                result_type,
+                assistant_message,
+                has_any_trusted_targets=has_any_trusted_targets,
+            )
+            and edit_followthrough_repairs < _MAX_EDIT_FOLLOWTHROUGH_REPAIRS
+        ):
+            edit_followthrough_repairs += 1
+            loop_transcript.append({"role": "assistant", "content": json.dumps(action_payload, ensure_ascii=False)})
+            loop_transcript.append(
+                {
+                    "role": "user",
+                    "content": _edit_followthrough_message(has_trusted_targets=has_any_trusted_targets),
+                }
+            )
+            continue
+
+        if result_type != "propose_edit" or not operations or not has_explicit_targets or not has_trusted_targets:
+            final_message = assistant_message
+            if result_type == "propose_edit":
+                if not operations or not has_explicit_targets:
+                    notices.append({
+                        "code": "agent_missing_targets",
+                        "items": ["The model proposed an edit without explicit document target ids, so no revision was staged."],
+                    })
+                    final_message = _revision_stage_failure_message(
+                        assistant_message,
+                        "",
+                        ["The proposed edit did not include explicit document target ids."],
+                    )
+                elif not has_trusted_targets:
+                    notices.append({
+                        "code": "agent_untrusted_targets",
+                        "items": ["The model proposed target ids that were not resolved from trusted document context, so no revision was staged."],
+                    })
+                    final_message = _revision_stage_failure_message(
+                        assistant_message,
+                        "",
+                        ["The proposed edit referenced unresolved document target ids."],
+                    )
+
+            if result_type != "propose_edit" and prompt_requests_edit and _assistant_message_claims_completed_edit(final_message):
+                notices.append(
+                    {
+                        "code": "agent_claimed_unstaged_edit",
+                        "items": [
+                            "The model described a completed document edit without staging any revision, so the response was rewritten to stay accurate.",
+                        ],
+                    }
+                )
+                final_message = _honest_unstaged_edit_message(
+                    "The assistant did not stage a revision in this turn."
+                )
 
             final_result_type = "clarify" if result_type == "clarify" else "answer"
             log_core_event(
@@ -1913,15 +2800,15 @@ async def stream_turn(
                 intent=intent,
                 documentSessionId=document_session_id,
                 revisionId=None,
-                message=assistant_message,
+                message=final_message,
                 notices=notices,
             )
-            for chunk in _chunk_text(assistant_message):
+            for chunk in _chunk_text(final_message):
                 yield "assistant_delta", chunk
             yield (
                 "done",
                 {
-                    "message": assistant_message,
+                    "message": final_message,
                     "mode": mode,
                     "intent": intent,
                     "resultType": final_result_type,
@@ -1993,9 +2880,11 @@ async def stream_turn(
             status=proposal.get("status"),
         )
 
-        revision_id = proposal.get("revision_id")
+        revision_id = str(proposal.get("revision_id") or "").strip() or None
+        proposal_status = _normalized_revision_status(proposal.get("status"))
         review: dict[str, Any] | None = None
-        if revision_id:
+        review_status = ""
+        if revision_id and proposal_status == "PENDING":
             yield _tool_started("review_pending_revision", sessionId=document_session_id, revisionId=revision_id)
             review = await client.review_pending_revision(document_session_id, revision_id)
             log_core_event(
@@ -2004,21 +2893,35 @@ async def stream_turn(
                 revisionId=revision_id,
                 review=review,
             )
+            review_status = _normalized_revision_status(review.get("status")) if isinstance(review, dict) else ""
             yield _tool_finished("review_pending_revision", sessionId=document_session_id, revisionId=revision_id)
 
         validation = proposal.get("validation") if isinstance(proposal, dict) else None
+        validation_errors = validation.get("errors") if isinstance(validation, dict) and isinstance(validation.get("errors"), list) else []
         if isinstance(validation, dict) and validation.get("errors"):
             notices.append({"code": "validation_errors", "items": validation.get("errors")})
         if isinstance(validation, dict) and validation.get("warnings"):
             notices.append({"code": "validation_warnings", "items": validation.get("warnings")})
 
+        reviewable_revision = bool(revision_id and proposal_status == "PENDING" and (not review_status or review_status == "PENDING"))
         final_message = assistant_message
+        if not reviewable_revision:
+            notices.append(
+                {
+                    "code": "revision_stage_rejected",
+                    "message": "Revision staging failed. No reviewable revision was created.",
+                    "items": validation_errors or ([f"Revision status: {proposal_status}"] if proposal_status and proposal_status != "PENDING" else []),
+                }
+            )
+            if result_type == "propose_edit":
+                final_message = _revision_stage_failure_message(assistant_message, proposal_status, validation_errors)
+
         log_core_event(
             "agent.turn.completed",
             mode=mode,
             intent=intent,
             documentSessionId=document_session_id,
-            revisionId=revision_id,
+            revisionId=revision_id if reviewable_revision else None,
             message=final_message,
             notices=notices,
         )
@@ -2031,38 +2934,18 @@ async def stream_turn(
                 "message": final_message,
                 "mode": mode,
                 "intent": intent,
-                "resultType": "revision_staged" if revision_id else "answer",
+                "resultType": "revision_staged" if reviewable_revision else "answer",
                 "documentSessionId": document_session_id,
                 "baseRevisionId": effective_base_revision_id or None,
-                "revisionId": revision_id,
+                "revisionId": revision_id if reviewable_revision else None,
                 "status": "completed",
                 "proposal": proposal,
-                "review": review,
+                "review": review if reviewable_revision else None,
                 "notices": notices or None,
                 "usage": _summarize_llm_requests(llm_requests),
             },
         )
         return
 
-    loop_limit_message = "The assistant needs a more specific request before it can continue."
-    notices.append({
-        "code": "agent_loop_limit",
-        "items": [f"The agent reached the maximum of {_MAX_AGENT_LOOP_STEPS} reasoning steps."],
-    })
-    for chunk in _chunk_text(loop_limit_message):
-        yield "assistant_delta", chunk
-    yield (
-        "done",
-        {
-            "message": loop_limit_message,
-            "mode": mode,
-            "intent": intent,
-            "resultType": "clarify",
-            "documentSessionId": document_session_id,
-            "baseRevisionId": base_revision_id or current_revision_id or None,
-            "revisionId": None,
-            "status": "completed",
-            "notices": notices or None,
-            "usage": _summarize_llm_requests(llm_requests),
-        },
-    )
+    # No fixed agent loop limit: loop continues until the agent returns or other
+    # terminating conditions are met above.

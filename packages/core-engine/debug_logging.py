@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextvars
+import inspect
 import json
 import threading
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,11 @@ _trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("docpilot_tr
 
 _CORE_ENGINE_ROOT = Path(__file__).resolve().parent
 _PACKAGES_ROOT = _CORE_ENGINE_ROOT.parent
+# Central logs root (project)/logs
+_PROJECT_ROOT = _PACKAGES_ROOT.parent
+_LOGS_ROOT = _PROJECT_ROOT / "logs"
+
+# legacy debug dirs (no longer used)
 _CORE_ENGINE_DEBUG_DIR = _CORE_ENGINE_ROOT / "debug"
 _DESKTOP_DEBUG_DIR = _PACKAGES_ROOT / "desktop" / "debug"
 
@@ -60,31 +67,111 @@ class _JsonlWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.Lock()
+        # Ensure logs directory exists (only the central `logs/` folder)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Never fail application startup due to logging directory creation
+            pass
 
-    def write(self, event: str, payload: dict[str, Any], *, trace_id: str | None = None) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "traceId": trace_id or get_trace_id() or None,
-            "event": event,
-            **payload,
-        }
+    def _write_record(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, ensure_ascii=False, default=_json_default)
         with self._lock:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
 
 
-_core_writer = _JsonlWriter(_CORE_ENGINE_DEBUG_DIR / "core-engine-flow.jsonl")
-_desktop_writer = _JsonlWriter(_DESKTOP_DEBUG_DIR / "desktop-flow.jsonl")
+def _get_caller_context() -> dict[str, Any]:
+    for frame in inspect.stack()[2:10]:
+        fname = Path(frame.filename).name
+        if fname == Path(__file__).name:
+            continue
+        return {
+            "func": frame.function,
+            "file": fname,
+            "line": frame.lineno,
+        }
+    return {"func": None, "file": None, "line": None}
+
+
+_core_info_writer = _JsonlWriter(_LOGS_ROOT / "core-engine-info.jsonl")
+_core_error_writer = _JsonlWriter(_LOGS_ROOT / "core-engine-error.jsonl")
+
+_desktop_info_writer = _JsonlWriter(_LOGS_ROOT / "desktop-info.jsonl")
+_desktop_error_writer = _JsonlWriter(_LOGS_ROOT / "desktop-error.jsonl")
+
+_docmcp_info_writer = _JsonlWriter(_LOGS_ROOT / "doc-mcp-info.jsonl")
+_docmcp_error_writer = _JsonlWriter(_LOGS_ROOT / "doc-mcp-error.jsonl")
+
+
+def _is_error_event(event: str, payload: dict[str, Any]) -> bool:
+    name = (event or "").lower()
+    if "error" in name or name.endswith(".error"):
+        return True
+    if any(k in payload for k in ("exception", "exc", "error", "traceback")):
+        return True
+    return False
+
+
+def _format_exception(exc: BaseException) -> str:
+    try:
+        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        return str(exc)
+
+
+def _emit(writer: _JsonlWriter, level: str, module: str, event: str, payload: dict[str, Any], *, trace_id: str | None = None) -> None:
+    ctx = _get_caller_context()
+    record: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "module": module,
+        "event": event,
+        "traceId": trace_id or get_trace_id() or None,
+        "caller": ctx,
+    }
+    # Merge payload gently, converting non-serializable items using _json_default
+    for k, v in payload.items():
+        # Capture exception traceback if present
+        if k in ("exception", "exc") and isinstance(v, BaseException):
+            record["exceptionType"] = type(v).__name__
+            record["exceptionMessage"] = str(v)
+            record["traceback"] = _format_exception(v)
+        else:
+            record[k] = v
+
+    writer._write_record(record)
 
 
 def log_core_event(event: str, **payload: Any) -> None:
-    _core_writer.write(event, payload)
+    """Write a structured info/error record for core-engine.
+
+    Heuristically treats events containing 'error' or carrying an exception
+    as errors (written to the error file). All other events go to the info file.
+    """
+    if _is_error_event(event, payload):
+        _emit(_core_error_writer, "error", "core-engine", event, payload, trace_id=payload.get("traceId"))
+    else:
+        _emit(_core_info_writer, "info", "core-engine", event, payload, trace_id=payload.get("traceId"))
 
 
 def log_desktop_event(event: str, *, trace_id: str | None = None, **payload: Any) -> None:
-    _desktop_writer.write(event, payload, trace_id=trace_id)
+    """Write a structured record for desktop-originated events.
+
+    Desktop info events go to `desktop-info.jsonl`. Errors are routed to
+    `desktop-error.jsonl`.
+    """
+    if _is_error_event(event, payload):
+        _emit(_desktop_error_writer, "error", "desktop", event, payload, trace_id=trace_id)
+    else:
+        _emit(_desktop_info_writer, "info", "desktop", event, payload, trace_id=trace_id)
+
+
+def log_docmcp_event(event: str, **payload: Any) -> None:
+    if _is_error_event(event, payload):
+        _emit(_docmcp_error_writer, "error", "doc-mcp", event, payload, trace_id=payload.get("traceId"))
+    else:
+        _emit(_docmcp_info_writer, "info", "doc-mcp", event, payload, trace_id=payload.get("traceId"))
 
 
 def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:

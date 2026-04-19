@@ -23,10 +23,80 @@ export interface RevisionValidation {
   warnings: string[];
 }
 
+export interface RevisionTextDiff {
+  blockId?: string | null;
+  changeType: string;
+  oldText?: string | null;
+  newText?: string | null;
+  offset?: number | null;
+}
+
+export interface RevisionStyleDiff {
+  blockId?: string | null;
+  runId?: string | null;
+  property: string;
+  oldValue?: string | null;
+  newValue?: string | null;
+}
+
+export interface RevisionLayoutDiff {
+  blockId?: string | null;
+  changeType: string;
+  oldValue?: string | null;
+  newValue?: string | null;
+}
+
+export interface RevisionDiff {
+  baseRevisionId?: string | null;
+  targetRevisionId?: string | null;
+  textEditCount: number;
+  styleEditCount: number;
+  layoutEditCount: number;
+  hasConflicts: boolean;
+  textDiffs: RevisionTextDiff[];
+  styleDiffs: RevisionStyleDiff[];
+  layoutDiffs: RevisionLayoutDiff[];
+}
+
+export interface PendingRevisionPreview {
+  revisionId: string;
+  documentSessionId?: string | null;
+  baseRevisionId?: string | null;
+  currentRevisionId?: string | null;
+  available: boolean;
+  message?: string | null;
+  html?: string | null;
+  sourceHtml?: string | null;
+  validation?: RevisionValidation;
+  diff?: RevisionDiff | null;
+}
+
+export interface ReviewOperationTarget {
+  blockId?: string | null;
+  runId?: string | null;
+  start?: number | null;
+  end?: number | null;
+  tableId?: string | null;
+  rowId?: string | null;
+  cellId?: string | null;
+  cellLogicalAddress?: string | null;
+}
+
 export interface ReviewOperation {
   op: string;
   description: string;
+  operationIndex?: number | null;
   blockId?: string | null;
+  target?: ReviewOperationTarget | null;
+  value?: unknown;
+}
+
+export interface ChatMessageRevisionLink {
+  revisionId: string;
+  documentSessionId?: string | null;
+  baseRevisionId?: string | null;
+  summary?: string | null;
+  status?: string | null;
 }
 
 export interface RevisionReview {
@@ -37,7 +107,9 @@ export interface RevisionReview {
   scope: string;
   createdAt?: string | null;
   operationCount: number;
+  affectedBlockIds: string[];
   validation?: RevisionValidation;
+  preview?: PendingRevisionPreview | null;
   operations: ReviewOperation[];
 }
 
@@ -59,6 +131,7 @@ export interface AgentNotice {
 export interface TurnUsageRequest {
   requestIndex: number;
   phase?: string | null;
+  requestPurpose?: string | null;
   provider?: string;
   providerDisplayName?: string;
   model?: string | null;
@@ -144,6 +217,7 @@ export interface ChatMessage {
   usage?: TurnUsage;
   toolActivity?: ToolActivity[];
   notices?: AgentNotice[];
+  linkedRevision?: ChatMessageRevisionLink | null;
 }
 
 export interface Chat {
@@ -202,6 +276,8 @@ export interface AppState extends PersistedState {
   composerValue: string;
   isSending: boolean;
   banner: string | null;
+  focusedChatMessageId: string | null;
+  focusedChatMessageRequestId: number;
 }
 
 export interface AgentTurnResponse {

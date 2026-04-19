@@ -80,3 +80,6 @@ info:
   app:
     name: DocPilot Doc MCP
     version: 2.0.0
+
+# ── Logging ───────────────────────────────────────────────────────────────
+LOG_DIR: E:\docpilot\logs

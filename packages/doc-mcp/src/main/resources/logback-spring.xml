@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <springProperty scope="context" name="docMcpLogFile" source="LOG_FILE" defaultValue="debug/doc-mcp.log"/>
+    <!-- 
+    Logs path resolution (in order of precedence):
+    1. Environment variable: LOG_DIR (absolute path)
+    2. Environment variable: DOC_MCP_LOGS_DIR 
+    3. Default: user.home/.docpilot/logs
+    
+    This ensures logs are written to a stable location regardless of where JAR is run from.
+    -->
+    <springProperty scope="context" name="logsDir" source="LOG_DIR" defaultValue="${user.home}/.docpilot/logs"/>
+    <springProperty scope="context" name="docMcpLogInfo" source="LOG_INFO_FILE" defaultValue="${logsDir}/doc-mcp-info.log"/>
+    <springProperty scope="context" name="docMcpLogError" source="LOG_ERROR_FILE" defaultValue="${logsDir}/doc-mcp-error.log"/>
 
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
@@ -11,14 +21,36 @@
         </encoder>
     </appender>
 
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${docMcpLogFile}</file>
+    <appender name="FILE_INFO" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${docMcpLogInfo}</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${docMcpLogFile}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
+            <fileNamePattern>${docMcpLogInfo}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
             <maxFileSize>25MB</maxFileSize>
             <maxHistory>7</maxHistory>
             <totalSizeCap>250MB</totalSizeCap>
         </rollingPolicy>
+        <!-- Exclude ERROR-level records from the info file to avoid duplication -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <level>ERROR</level>
+            <onMatch>DENY</onMatch>
+            <onMismatch>NEUTRAL</onMismatch>
+        </filter>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{docpilotTraceId:-no-trace}] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="FILE_ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${docMcpLogError}</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${docMcpLogError}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
+            <maxFileSize>25MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>250MB</totalSizeCap>
+        </rollingPolicy>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
         <encoder>
             <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{docpilotTraceId:-no-trace}] %logger{36} - %msg%n</pattern>
         </encoder>
@@ -28,6 +60,7 @@
 
     <root level="INFO">
         <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="FILE"/>
+        <appender-ref ref="FILE_INFO"/>
+        <appender-ref ref="FILE_ERROR"/>
     </root>
 </configuration>

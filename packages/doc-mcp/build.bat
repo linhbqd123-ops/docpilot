@@ -3,7 +3,6 @@ setlocal enabledelayedexpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "BUILD_MODE="
-set "BUNDLE_QDRANT=false"
 set "MVN_ARGS="
 
 :parse_args
@@ -13,11 +12,7 @@ if /I "%~1"=="win-app" (
 	shift
 	goto parse_args
 )
-if /I "%~1"=="--bundle-qdrant" (
-	set "BUNDLE_QDRANT=true"
-	shift
-	goto parse_args
-)
+REM --bundle-qdrant option removed (personalization/qdrant no longer supported)
 set "MVN_ARGS=!MVN_ARGS! %~1"
 shift
 goto parse_args
@@ -106,11 +101,6 @@ if errorlevel 1 exit /b 1
 
 echo App image created at dist\DocPilotMcp
 
-if /I not "%BUNDLE_QDRANT%"=="true" goto end
-
-powershell -ExecutionPolicy Bypass -File "%SCRIPT_DIR%packaging\bundle-qdrant.ps1" -AppImageDir "%SCRIPT_DIR%dist\DocPilotMcp" -QdrantZipPath "%QDRANT_WINDOWS_ZIP%" -QdrantDownloadUrl "%QDRANT_DOWNLOAD_URL%"
-if errorlevel 1 exit /b 1
-
-echo Qdrant sidecar bundled into dist\DocPilotMcp
+REM Qdrant bundling removed
 
 :end

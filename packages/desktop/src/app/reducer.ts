@@ -38,7 +38,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     maxToolBatchSize: 4,
     maxParallelTools: 3,
     maxHeavyToolsPerTurn: 1,
-    autoCompactSession: true,
+    autoCompactSession: false,
   },
   mode: "agent",
   theme: DEFAULT_THEME,
@@ -77,6 +77,8 @@ export function createInitialState(persisted: Partial<PersistedState>): AppState
     composerValue: "",
     isSending: false,
     banner: null,
+    focusedChatMessageId: null,
+    focusedChatMessageRequestId: 0,
   };
 }
 
@@ -91,6 +93,7 @@ type Action =
   | { type: "setSettings"; payload: Partial<AppSettings> }
   | { type: "setBanner"; payload: string | null }
   | { type: "setIsSending"; payload: boolean }
+  | { type: "setFocusedChatMessage"; payload: string | null }
   | { type: "addMessage"; payload: { documentId: string; message: ChatMessage } }
   | { type: "updateMessage"; payload: { documentId: string; messageId: string; patch: Partial<ChatMessage> } }
   | { type: "clearMessages"; payload: string }
@@ -126,7 +129,7 @@ type Action =
     type: "stageRevision";
     payload: {
       documentId: string;
-      revisionId: string;
+      revisionId: string | null | undefined;
       reviewPayload: RevisionReview | null;
       status?: string | null;
       baseRevisionId?: string | null;
@@ -160,6 +163,7 @@ export function appReducer(state: AppState, action: Action): AppState {
           )
             ? state.selectedChatId
             : null,
+        focusedChatMessageId: null,
       };
     }
 
@@ -194,6 +198,8 @@ export function appReducer(state: AppState, action: Action): AppState {
           state.selectedDocumentId === action.payload ? documents[0]?.id ?? null : state.selectedDocumentId,
         selectedChatId:
           state.selectedChatId && removedChatIds.includes(state.selectedChatId) ? null : state.selectedChatId,
+        focusedChatMessageId:
+          state.selectedChatId && removedChatIds.includes(state.selectedChatId) ? null : state.focusedChatMessageId,
       };
     }
 
@@ -202,6 +208,7 @@ export function appReducer(state: AppState, action: Action): AppState {
         ...state,
         selectedDocumentId: action.payload,
         selectedChatId: null,
+        focusedChatMessageId: null,
       };
 
     case "setComposer":
@@ -238,6 +245,29 @@ export function appReducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         isSending: action.payload,
+      };
+
+    case "setFocusedChatMessage":
+      if (import.meta.env.DEV) {
+        try {
+          // eslint-disable-next-line no-console
+          console.debug("[reducer] setFocusedChatMessage", {
+            payload: action.payload,
+            prev: state.focusedChatMessageId,
+            nextRequestId: state.focusedChatMessageRequestId + 1,
+            at: new Date().toISOString(),
+          });
+          // eslint-disable-next-line no-console
+          console.debug(new Error().stack);
+        } catch (err) {
+          // ignore
+        }
+      }
+
+      return {
+        ...state,
+        focusedChatMessageId: action.payload,
+        focusedChatMessageRequestId: state.focusedChatMessageRequestId + 1,
       };
 
     case "addMessage": {
@@ -318,6 +348,10 @@ export function appReducer(state: AppState, action: Action): AppState {
           state.selectedChatId && chats.some((chat) => chat.id === state.selectedChatId)
             ? state.selectedChatId
             : null,
+        focusedChatMessageId:
+          state.selectedChatId && chats.some((chat) => chat.id === state.selectedChatId)
+            ? state.focusedChatMessageId
+            : null,
       };
     }
 
@@ -348,6 +382,7 @@ export function appReducer(state: AppState, action: Action): AppState {
           )
             ? action.payload
             : null,
+        focusedChatMessageId: null,
       };
 
     case "deleteChat": {
@@ -360,6 +395,7 @@ export function appReducer(state: AppState, action: Action): AppState {
         chats,
         messageThreads,
         selectedChatId: state.selectedChatId === action.payload ? null : state.selectedChatId,
+        focusedChatMessageId: state.selectedChatId === action.payload ? null : state.focusedChatMessageId,
       };
     }
 

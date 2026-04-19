@@ -18,7 +18,9 @@ class FakeAgentDocMcpClient:
         self.projection_html = projection_html
         self.source_calls: list[str] = []
         self.projection_calls: list[str] = []
+        self.preview_calls: list[str] = []
         self.apply_calls: list[str] = []
+        self.restore_calls: list[str] = []
 
     async def get_source_html(self, session_id: str) -> str:
         self.source_calls.append(session_id)
@@ -39,8 +41,44 @@ class FakeAgentDocMcpClient:
     async def get_revision(self, revision_id: str) -> dict[str, Any]:
         return {"revision_id": revision_id, "session_id": "session-1", "status": "PENDING"}
 
+    async def preview_revision(self, revision_id: str) -> dict[str, Any]:
+        self.preview_calls.append(revision_id)
+        return {
+            "revision_id": revision_id,
+            "session_id": "session-1",
+            "available": True,
+            "diff": {
+                "target_revision_id": revision_id,
+                "text_edit_count": 1,
+                "style_edit_count": 1,
+                "layout_edit_count": 0,
+                "has_conflicts": False,
+                "text_diffs": [
+                    {
+                        "block_id": "block-1",
+                        "change_type": "REPLACE",
+                        "old_text": "Before",
+                        "new_text": "After",
+                    }
+                ],
+                "style_diffs": [
+                    {
+                        "block_id": "block-1",
+                        "property": "alignment",
+                        "old_value": "LEFT",
+                        "new_value": "CENTER",
+                    }
+                ],
+                "layout_diffs": [],
+            },
+        }
+
     async def apply_revision(self, revision_id: str) -> dict[str, Any]:
         self.apply_calls.append(revision_id)
+        return {"revision_id": revision_id, "status": "APPLIED", "current_revision_id": revision_id}
+
+    async def restore_revision(self, revision_id: str) -> dict[str, Any]:
+        self.restore_calls.append(revision_id)
         return {"revision_id": revision_id, "status": "APPLIED", "current_revision_id": revision_id}
 
 
@@ -85,3 +123,35 @@ def test_apply_revision_returns_fidelity_html_payload(monkeypatch) -> None:
     assert payload["sourceHtml"] == "<article><p>Edited fidelity source</p></article>"
     assert payload["result"]["status"] == "APPLIED"
     assert fake_client.apply_calls == ["rev-2"]
+
+def test_preview_revision_returns_pending_preview_payload(monkeypatch) -> None:
+    fake_client = FakeAgentDocMcpClient(source_html="<article><p>Current fidelity source</p></article>")
+    monkeypatch.setattr(agent_api, "_doc_mcp_client", lambda: fake_client)
+
+    with TestClient(build_agent_app()) as client:
+        response = client.get("/api/agent/revisions/rev-preview/preview")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["revisionId"] == "rev-preview"
+    assert payload["documentSessionId"] == "session-1"
+    assert payload["available"] is True
+    assert payload["diff"]["style_edit_count"] == 1
+    assert payload["diff"]["text_diffs"][0]["new_text"] == "After"
+    assert fake_client.preview_calls == ["rev-preview"]
+
+
+def test_restore_revision_returns_fidelity_html_payload(monkeypatch) -> None:
+    fake_client = FakeAgentDocMcpClient(source_html="<article><p>Restored fidelity source</p></article>")
+    monkeypatch.setattr(agent_api, "_doc_mcp_client", lambda: fake_client)
+
+    with TestClient(build_agent_app()) as client:
+        response = client.post("/api/agent/revisions/rev-restore/restore")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["documentSessionId"] == "session-1"
+    assert payload["html"] == "<article><p>Restored fidelity source</p></article>"
+    assert payload["sourceHtml"] == "<article><p>Restored fidelity source</p></article>"
+    assert payload["result"]["status"] == "APPLIED"
+    assert fake_client.restore_calls == ["rev-restore"]

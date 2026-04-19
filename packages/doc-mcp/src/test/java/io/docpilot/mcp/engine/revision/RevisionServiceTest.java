@@ -1,5 +1,10 @@
 package io.docpilot.mcp.engine.revision;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.docpilot.mcp.engine.anchor.AnchorService;
+import io.docpilot.mcp.engine.diff.DiffService;
 import io.docpilot.mcp.converter.AnalysisHtmlConverter;
 import io.docpilot.mcp.engine.fidelity.FidelityHtmlService;
 import io.docpilot.mcp.engine.patch.PatchEngine;
@@ -9,6 +14,7 @@ import io.docpilot.mcp.model.document.DocumentComponent;
 import io.docpilot.mcp.model.patch.Patch;
 import io.docpilot.mcp.model.patch.PatchValidation;
 import io.docpilot.mcp.model.revision.ConflictRevision;
+import io.docpilot.mcp.model.revision.PendingRevisionPreview;
 import io.docpilot.mcp.model.revision.Revision;
 import io.docpilot.mcp.model.revision.RevisionStatus;
 import io.docpilot.mcp.model.session.DocumentSession;
@@ -142,6 +148,26 @@ class RevisionServiceTest {
     }
 
     @Test
+    void rejectFailsForAppliedRevisions() {
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
+
+        Revision revision = revision("rev-applied", "session-1", "rev-base", "patch-1", RevisionStatus.APPLIED);
+        revisionStore.revisions.put("rev-applied", revision);
+
+        ConflictException error = assertThrows(
+            ConflictException.class,
+            () -> revisionService.reject("rev-applied")
+        );
+
+        assertEquals("An applied revision cannot be rejected. Roll it back instead.", error.getMessage());
+        assertTrue(revisionStore.savedRevisions.isEmpty());
+        assertFalse(patchEngine.applyCalled);
+    }
+
+    @Test
     void rollbackRestoresBaseSnapshotAndPersistsSession() {
         RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
@@ -205,6 +231,41 @@ class RevisionServiceTest {
     }
 
     @Test
+    void previewBuildsDiffAndFidelityHtmlWithoutMutatingSession() {
+        DocumentComponent originalRoot = component("root-original");
+        DocumentComponent appliedRoot = component("root-applied");
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(appliedRoot);
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+
+        DocumentSession session = session("session-1", "rev-base", originalRoot);
+        Revision revision = revision("rev-preview", "session-1", "rev-base", "patch-1", RevisionStatus.PENDING);
+        Patch patch = patch("patch-1", "session-1", "rev-base", List.of("block-1"));
+
+        revisionStore.revisions.put("rev-preview", revision);
+        revisionStore.patches.put("patch-1", patch);
+        seedCurrentSourceHtml(sessionStore, "session-1", "<article><p data-doc-node-id=\"block-1\">Original</p></article>");
+
+        PendingRevisionPreview preview = revisionService.preview("rev-preview", session);
+
+        assertTrue(preview.isAvailable());
+        assertEquals("rev-preview", preview.getRevisionId());
+        assertEquals("session-1", preview.getSessionId());
+        assertEquals("rev-base", preview.getCurrentRevisionId());
+        assertNotNull(preview.getDiff());
+        assertEquals("rev-preview", preview.getDiff().getTargetRevisionId());
+        assertNotNull(preview.getHtml());
+        assertTrue(preview.getHtml().contains("Original"));
+        assertSame(originalRoot, session.getRoot());
+        assertEquals("rev-base", session.getCurrentRevisionId());
+        assertTrue(patchEngine.applyCalled);
+        assertTrue(sessionStore.savedSessions.isEmpty());
+        assertTrue(semanticSearchService.reindexedSessionIds.isEmpty());
+    }
+
+    @Test
     void rollbackFailsBeforeMutatingSessionWhenFidelitySnapshotIsMissing() {
         RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
         InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
@@ -252,19 +313,136 @@ class RevisionServiceTest {
         assertTrue(sessionStore.savedSessions.isEmpty());
     }
 
+    @Test
+    void restoreReactivatesRolledBackCheckpointFromSnapshot() {
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+
+        DocumentComponent currentRoot = component("root-current");
+        DocumentComponent restoredRoot = component("root-restore-target");
+        DocumentSession session = session("session-1", "rev-base", currentRoot);
+        Revision revision = revision("rev-restore", "session-1", "rev-base", "patch-1", RevisionStatus.REJECTED)
+            .toBuilder()
+            .appliedAt(Instant.parse("2026-04-18T00:00:00Z"))
+            .build();
+
+        revisionStore.revisions.put("rev-restore", revision);
+        revisionStore.snapshots.put("session-1::rev-restore", restoredRoot);
+        seedRevisionSourceSnapshot(sessionStore, "session-1", "rev-restore", "<article><p>Redo version</p></article>");
+
+        Revision restored = revisionService.restore("rev-restore", session);
+
+        assertEquals(RevisionStatus.APPLIED, restored.getStatus());
+        assertEquals("rev-restore", session.getCurrentRevisionId());
+        assertSame(restoredRoot, session.getRoot());
+        assertEquals(1, sessionStore.savedSessions.size());
+        assertEquals(List.of("session-1"), semanticSearchService.reindexedSessionIds);
+        assertEquals(1, revisionStore.savedRevisions.size());
+        assertEquals(RevisionStatus.APPLIED, revisionStore.savedRevisions.get(0).getStatus());
+        assertTrue(
+            sessionStore.findTextAsset("session-1", FidelityHtmlService.CURRENT_SOURCE_ASSET_NAME)
+                .orElseThrow()
+                .contains("Redo version")
+        );
+    }
+
+    @Test
+    void restoreRejectsDraftsThatWereNeverApplied() {
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
+
+        DocumentSession session = session("session-1", "rev-base", component("root-current"));
+        Revision revision = revision("rev-draft", "session-1", "rev-base", "patch-1", RevisionStatus.REJECTED);
+        revisionStore.revisions.put("rev-draft", revision);
+
+        ConflictException error = assertThrows(
+            ConflictException.class,
+            () -> revisionService.restore("rev-draft", session)
+        );
+
+        assertEquals("Only an applied checkpoint can be restored.", error.getMessage());
+        assertEquals("rev-base", session.getCurrentRevisionId());
+        assertTrue(sessionStore.savedSessions.isEmpty());
+    }
+
+    @Test
+    void applyFailsForConflictRevisions() {
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(component("unused"));
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, new RecordingSemanticSearchService());
+
+        DocumentSession session = session("session-1", "rev-current", component("root-current"));
+        Revision revision = revision("rev-conflict", "session-1", "rev-base", "patch-1", RevisionStatus.CONFLICT);
+        revisionStore.revisions.put("rev-conflict", revision);
+
+        ConflictException error = assertThrows(
+            ConflictException.class,
+            () -> revisionService.apply("rev-conflict", session)
+        );
+
+        assertEquals("This revision is in conflict and cannot be applied.", error.getMessage());
+        assertFalse(patchEngine.applyCalled);
+        assertTrue(revisionStore.savedRevisions.isEmpty());
+    }
+
+    @Test
+    void applyRejectsPendingRevisionWhenPatchNoLongerValid() {
+        DocumentComponent originalRoot = component("root-original");
+        RecordingPatchEngine patchEngine = new RecordingPatchEngine(
+            component("unused"),
+            List.of("Cannot locate target block=block-1")
+        );
+        InMemoryRevisionStore revisionStore = new InMemoryRevisionStore();
+        InMemoryDocumentSessionStore sessionStore = new InMemoryDocumentSessionStore();
+        RecordingSemanticSearchService semanticSearchService = new RecordingSemanticSearchService();
+        RevisionService revisionService = revisionService(patchEngine, revisionStore, sessionStore, semanticSearchService);
+
+        DocumentSession session = session("session-1", "rev-base", originalRoot);
+        Revision revision = revision("rev-apply", "session-1", "rev-base", "patch-1", RevisionStatus.PENDING);
+        Patch patch = patch("patch-1", "session-1", "rev-base", List.of("block-1"));
+
+        revisionStore.revisions.put("rev-apply", revision);
+        revisionStore.patches.put("patch-1", patch);
+
+        ConflictException error = assertThrows(
+            ConflictException.class,
+            () -> revisionService.apply("rev-apply", session)
+        );
+
+        assertEquals("This revision can no longer be applied: Cannot locate target block=block-1", error.getMessage());
+        assertFalse(patchEngine.applyCalled);
+        assertSame(originalRoot, session.getRoot());
+        assertEquals("rev-base", session.getCurrentRevisionId());
+        assertEquals(1, revisionStore.savedRevisions.size());
+        assertEquals(RevisionStatus.REJECTED, revisionStore.savedRevisions.get(0).getStatus());
+        assertTrue(sessionStore.savedSessions.isEmpty());
+        assertTrue(semanticSearchService.reindexedSessionIds.isEmpty());
+    }
+
     private static RevisionService revisionService(
         PatchEngine patchEngine,
         InMemoryRevisionStore revisionStore,
         InMemoryDocumentSessionStore sessionStore,
         RecordingSemanticSearchService semanticSearchService
     ) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
+        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         return new RevisionService(
             patchEngine,
+            new DiffService(new AnchorService()),
             revisionStore,
             sessionStore,
             semanticSearchService,
             new FidelityHtmlService(),
-            new AnalysisHtmlConverter()
+            new AnalysisHtmlConverter(),
+            objectMapper
         );
     }
 
@@ -345,6 +523,7 @@ class RevisionServiceTest {
 
     private static final class RecordingPatchEngine extends PatchEngine {
         private final DocumentComponent rootAfterApply;
+        private final List<String> dryRunErrors;
         private boolean applyCalled;
         private Patch appliedPatch;
         private DocumentSession appliedSession;
@@ -352,16 +531,21 @@ class RevisionServiceTest {
         private String appliedAuthor;
 
         private RecordingPatchEngine(DocumentComponent rootAfterApply) {
+            this(rootAfterApply, List.of());
+        }
+
+        private RecordingPatchEngine(DocumentComponent rootAfterApply, List<String> dryRunErrors) {
             super(null, null);
             this.rootAfterApply = rootAfterApply;
+            this.dryRunErrors = dryRunErrors;
         }
 
         @Override
         public PatchValidation dryRun(Patch patch, DocumentSession session) {
             return PatchValidation.builder()
-                .structureOk(true)
-                .styleOk(true)
-                .errors(List.of())
+                .structureOk(dryRunErrors.isEmpty())
+                .styleOk(dryRunErrors.isEmpty())
+                .errors(dryRunErrors)
                 .warnings(List.of())
                 .affectedBlockIds(List.of())
                 .scope("minor")

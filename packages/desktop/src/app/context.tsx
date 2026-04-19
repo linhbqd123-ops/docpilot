@@ -4,6 +4,7 @@ import {
   useEffect,
   useReducer,
   useRef,
+  useState,
   type PropsWithChildren,
 } from "react";
 
@@ -13,7 +14,10 @@ import type {
   AppState,
   Chat,
   ChatMessage,
+  ChatMessageRevisionLink,
   DocumentRecord,
+  PendingRevisionPreview,
+  RevisionReview,
   SidebarView,
   ToolActivity,
   TurnUsage,
@@ -23,20 +27,24 @@ import { appReducer, createInitialState } from "@/app/reducer";
 import { getThemeDefinition } from "@/app/themes";
 import {
   applyRevisionInBackend,
+  applyPartialRevisionInBackend,
   checkBackendHealth,
   deleteDocumentFromBackend,
   deleteChat as deleteChatApi,
   exportDocumentToDocx,
+  fetchPendingRevisionPreview,
   getErrorMessage,
   importDocumentFromBackend,
   loadChatsFromBackend,
   loadDocumentsFromBackend,
   refreshSessionFromBackend,
   rejectRevisionInBackend,
+  restoreRevisionInBackend,
   rollbackRevisionInBackend,
   saveDocumentToBackend,
   saveChat,
   sendAgentTurnToBackend,
+  syncSessionHtml,
   updateChat,
 } from "@/lib/api";
 import { createDocumentFromFile, normalizeDocumentHtml } from "@/lib/document";
@@ -46,8 +54,12 @@ import { loadLegacyDocumentsSnapshot, loadPersistedState, savePersistedState } f
 interface AppContextValue {
   state: AppState;
   selectedDocument: DocumentRecord | null;
+  selectedReview: RevisionReview | null;
   selectedChat: Chat | null;
   currentMessages: ChatMessage[];
+  focusedReviewBlockId: string | null;
+  focusedReviewChangeId: string | null;
+  focusedReviewRequestId: number;
   importFiles: (files: FileList | File[]) => Promise<void>;
   removeDocument: (documentId: string) => void;
   selectDocument: (documentId: string | null) => void;
@@ -59,15 +71,21 @@ interface AppContextValue {
   retryMessage: (assistantMessageId: string) => Promise<void>;
   cancelRequest: () => void;
   applyStagedRevision: () => Promise<void>;
+  applyPartialStagedRevision: (acceptedOperationIndices: number[]) => Promise<void>;
   rejectStagedRevision: () => Promise<void>;
   rollbackCurrentRevision: () => Promise<void>;
+  restoreRevisionCheckpoint: (revisionId: string) => Promise<void>;
   updateSelectedDocumentHtml: (html: string) => void;
   exportDocument: () => Promise<void>;
   clearBanner: () => void;
   clearChat: () => void;
   compactCurrentChat: () => void;
   createNewChat: () => void;
+  requestCompactNextTurn: () => void;
   selectChat: (chatId: string | null) => void;
+  focusReviewChange: (changeId: string, blockId?: string | null) => void;
+  clearReviewFocus: () => void;
+  focusChatMessage: (chatId: string, messageId: string) => void;
   deleteChat: (chatId: string) => void;
   renameChat: (chatId: string, name: string) => void;
 }
@@ -173,6 +191,30 @@ function resolveProviderTelemetry(settings: AppSettings) {
   };
 }
 
+function buildLinkedRevisionPayload(args: {
+  reply: {
+    revisionId?: string | null;
+    documentSessionId?: string | null;
+    baseRevisionId?: string | null;
+    proposal?: { summary: string; status: string } | null;
+    review?: { summary: string; status: string } | null;
+  };
+  fallbackSessionId?: string | null;
+}): ChatMessageRevisionLink | null {
+  const { reply, fallbackSessionId } = args;
+  if (!reply.revisionId) {
+    return null;
+  }
+
+  return {
+    revisionId: reply.revisionId,
+    documentSessionId: reply.documentSessionId ?? fallbackSessionId ?? null,
+    baseRevisionId: reply.baseRevisionId ?? null,
+    summary: reply.review?.summary ?? reply.proposal?.summary ?? null,
+    status: reply.review?.status ?? reply.proposal?.status ?? null,
+  };
+}
+
 function inferPhase(toolActivity: ToolActivity[], mode: ChatMessage["mode"], resultType?: string) {
   const llmActivity = [...toolActivity].reverse().find((activity) => activity.tool === "llm_inference");
   const phase = typeof llmActivity?.phase === "string" ? llmActivity.phase : "";
@@ -204,10 +246,16 @@ function hydrateTurnUsage(args: {
   const outputChars = assistantText.length;
   const estimatedOutputTokens = estimateTokenCount(assistantText);
   const phase = inferPhase(toolActivity, mode, resultType);
+  const fallbackRequestPurpose = phase === "plan_revision"
+    ? "Prepare revision proposal"
+    : phase === "agent_loop"
+      ? "Reason about next step"
+      : "Compose final answer";
 
   const fallbackRequest: TurnUsageRequest = {
     requestIndex: 1,
     phase,
+    requestPurpose: fallbackRequestPurpose,
     provider: providerTelemetry.provider,
     providerDisplayName: providerTelemetry.providerDisplayName,
     model: providerTelemetry.model,
@@ -228,6 +276,7 @@ function hydrateTurnUsage(args: {
     return {
       requestIndex,
       phase: request.phase || phase,
+      requestPurpose: request.requestPurpose || fallbackRequestPurpose,
       provider: request.provider || providerTelemetry.provider,
       providerDisplayName: request.providerDisplayName || providerTelemetry.providerDisplayName,
       model: request.model || providerTelemetry.model,
@@ -305,12 +354,30 @@ function hydrateToolActivityTelemetry(args: {
 export function AppProvider({ children }: PropsWithChildren) {
   const [state, dispatch] = useReducer(appReducer, loadPersistedState(), createInitialState);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const forceCompactNextRef = useRef(false);
+  const [reviewFocus, setReviewFocus] = useState({
+    changeId: null as string | null,
+    blockId: null as string | null,
+    requestId: 0,
+  });
+  const [reviewPreviewCache, setReviewPreviewCache] = useState<Record<string, PendingRevisionPreview>>({});
   const documentsRef = useRef<DocumentRecord[]>(state.documents);
   const previousDocumentsRef = useRef<DocumentRecord[]>([]);
   const documentsSyncReadyRef = useRef(false);
   const legacyDocumentsRef = useRef<DocumentRecord[]>(loadLegacyDocumentsSnapshot());
 
   const selectedDocument = state.documents.find((document) => document.id === state.selectedDocumentId) ?? null;
+  const cachedSelectedPreview = selectedDocument?.pendingRevisionId
+    ? reviewPreviewCache[selectedDocument.pendingRevisionId] ?? null
+    : null;
+  const selectedReview = selectedDocument?.reviewPayload
+    ? {
+      ...selectedDocument.reviewPayload,
+      preview: cachedSelectedPreview ?? selectedDocument.reviewPayload.preview ?? null,
+    }
+    : null;
+  const selectedPreviewHtml = selectedReview?.preview?.html ?? null;
+  const selectedPreviewAvailable = selectedReview?.preview?.available ?? null;
   const selectedChat = selectedDocument && state.selectedChatId
     ? state.chats.find((chat) => chat.id === state.selectedChatId && chat.documentId === selectedDocument.id) ?? null
     : null;
@@ -360,6 +427,10 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     documentsRef.current = state.documents;
   }, [state.documents]);
+
+  useEffect(() => {
+    setReviewFocus({ changeId: null, blockId: null, requestId: 0 });
+  }, [selectedDocument?.id]);
 
   useEffect(() => {
     const theme = getThemeDefinition(state.settings.theme);
@@ -569,6 +640,50 @@ export function AppProvider({ children }: PropsWithChildren) {
     };
   }, [selectedDocument?.id, selectedDocument?.documentSessionId, state.settings]);
 
+  useEffect(() => {
+    if (!selectedDocument?.pendingRevisionId || !selectedReview || !state.settings.apiBaseUrl.trim()) {
+      return;
+    }
+
+    const needsHydratedPreview = !selectedPreviewHtml && selectedPreviewAvailable !== false;
+    if (!needsHydratedPreview) {
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchPendingRevisionPreview({
+      settings: state.settings,
+      revisionId: selectedDocument.pendingRevisionId,
+    })
+      .then((preview) => {
+        if (cancelled) {
+          return;
+        }
+
+        setReviewPreviewCache((current) => {
+          const existing = current[selectedDocument.pendingRevisionId!];
+          if (existing?.html === preview.html && existing?.sourceHtml === preview.sourceHtml) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [selectedDocument.pendingRevisionId!]: preview,
+          };
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error("Failed to hydrate pending revision preview:", error);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDocument?.id, selectedDocument?.pendingRevisionId, selectedPreviewAvailable, selectedPreviewHtml, state.settings]);
+
   async function importFiles(files: FileList | File[]) {
     const queue = Array.from(files);
 
@@ -757,6 +872,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     const historyWithUserMessage = [...currentMessages, userMessage];
 
     try {
+      const forceCompactForThisTurn = forceCompactNextRef.current;
+      forceCompactNextRef.current = false;
+
+      if (state.settings.apiBaseUrl.trim() && selectedDocument.documentSessionId && selectedDocument.sourceHtml) {
+        await syncSessionHtml(state.settings.apiBaseUrl, selectedDocument.documentSessionId, selectedDocument.sourceHtml);
+      }
+
       const reply = await sendAgentTurnToBackend({
         settings: state.settings,
         chatId: messageThreadId,
@@ -766,6 +888,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         visibleBlockIds: selectedDocument.outline.map((item) => item.id),
         history: historyWithUserMessage,
         prompt,
+        forceCompact: forceCompactForThisTurn,
         signal: controller.signal,
         onTextChunk: (chunk) => {
           accumulated += chunk;
@@ -826,6 +949,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
 
       const assistantContent = reply.message || accumulated;
+      const linkedRevision = buildLinkedRevisionPayload({
+        reply,
+        fallbackSessionId: selectedDocument.documentSessionId ?? null,
+      });
       const completedAssistantMessage: ChatMessage = {
         ...assistantMessage,
         content: assistantContent,
@@ -834,6 +961,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         usage: resolvedUsage,
         toolActivity: latestToolActivity,
         notices: reply.notices,
+        linkedRevision,
       };
 
       dispatch({
@@ -848,6 +976,7 @@ export function AppProvider({ children }: PropsWithChildren) {
             usage: resolvedUsage,
             toolActivity: latestToolActivity,
             notices: reply.notices,
+            linkedRevision,
           },
         },
       });
@@ -866,7 +995,13 @@ export function AppProvider({ children }: PropsWithChildren) {
         "Failed to sync chat to backend:",
       );
 
-      if (reply.resultType === "revision_staged" && reply.revisionId) {
+      const reviewableRevision =
+        reply.resultType === "revision_staged"
+        && reply.revisionId
+        && (!reply.proposal?.status || reply.proposal.status.toUpperCase() === "PENDING")
+        && (!reply.review?.status || reply.review.status.toUpperCase() === "PENDING");
+
+      if (reviewableRevision) {
         dispatch({
           type: "stageRevision",
           payload: {
@@ -883,7 +1018,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       const noticeText = formatNotices(reply.notices);
       if (noticeText) {
         dispatch({ type: "setBanner", payload: noticeText });
-      } else if (reply.resultType === "revision_staged") {
+      } else if (reviewableRevision) {
         dispatch({ type: "setBanner", payload: "Revision staged for review." });
       }
     } catch (error) {
@@ -989,6 +1124,13 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
 
     try {
+      const forceCompactForThisTurn = forceCompactNextRef.current;
+      forceCompactNextRef.current = false;
+
+      if (state.settings.apiBaseUrl.trim() && sessionId && selectedDocument.sourceHtml) {
+        await syncSessionHtml(state.settings.apiBaseUrl, sessionId, selectedDocument.sourceHtml);
+      }
+
       const reply = await sendAgentTurnToBackend({
         settings: state.settings,
         chatId: messageThreadId,
@@ -998,6 +1140,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         visibleBlockIds: selectedDocument.outline.map((item) => item.id),
         history: historyUpToUser,
         prompt: userMessage.content,
+        forceCompact: forceCompactForThisTurn,
         signal: controller.signal,
         onTextChunk: (chunk) => {
           accumulated += chunk;
@@ -1058,6 +1201,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
 
       const assistantContent = reply.message || accumulated;
+      const linkedRevision = buildLinkedRevisionPayload({
+        reply,
+        fallbackSessionId: selectedDocument.documentSessionId ?? null,
+      });
       const completedAssistantMessage: ChatMessage = {
         ...assistantMessage,
         content: assistantContent,
@@ -1066,6 +1213,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         usage: resolvedUsage,
         toolActivity: latestToolActivity,
         notices: reply.notices,
+        linkedRevision,
       };
 
       dispatch({
@@ -1080,6 +1228,7 @@ export function AppProvider({ children }: PropsWithChildren) {
             usage: resolvedUsage,
             toolActivity: latestToolActivity,
             notices: reply.notices,
+            linkedRevision,
           },
         },
       });
@@ -1095,7 +1244,13 @@ export function AppProvider({ children }: PropsWithChildren) {
         "Failed to sync chat to backend:",
       );
 
-      if (reply.resultType === "revision_staged" && reply.revisionId) {
+      const reviewableRevision =
+        reply.resultType === "revision_staged"
+        && reply.revisionId
+        && (!reply.proposal?.status || reply.proposal.status.toUpperCase() === "PENDING")
+        && (!reply.review?.status || reply.review.status.toUpperCase() === "PENDING");
+
+      if (reviewableRevision) {
         dispatch({
           type: "stageRevision",
           payload: {
@@ -1112,7 +1267,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       const noticeTextStr = formatNotices(reply.notices);
       if (noticeTextStr) {
         dispatch({ type: "setBanner", payload: noticeTextStr });
-      } else if (reply.resultType === "revision_staged") {
+      } else if (reviewableRevision) {
         dispatch({ type: "setBanner", payload: "Revision staged for review." });
       }
     } catch (error) {
@@ -1187,9 +1342,46 @@ export function AppProvider({ children }: PropsWithChildren) {
           revisionStatus: payload.result?.status ?? "APPLIED",
         },
       });
+      clearReviewFocus();
       dispatch({ type: "setBanner", payload: "Revision applied to the fidelity-backed document." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to apply revision: ${getErrorMessage(error)}` });
+    }
+  }
+
+  async function applyPartialStagedRevision(acceptedOperationIndices: number[]) {
+    if (!selectedDocument?.pendingRevisionId) {
+      return;
+    }
+
+    try {
+      dispatch({ type: "setBanner", payload: "Applying selected changes…" });
+      const payload = await applyPartialRevisionInBackend({
+        settings: state.settings,
+        revisionId: selectedDocument.pendingRevisionId,
+        acceptedIndices: acceptedOperationIndices,
+      });
+
+      if (!payload.html) {
+        throw new Error("The backend did not return refreshed document HTML after partial apply.");
+      }
+
+      dispatch({
+        type: "setDocumentProjection",
+        payload: {
+          documentId: selectedDocument.id,
+          html: payload.html,
+          sourceHtml: payload.sourceHtml ?? payload.html ?? null,
+          session: payload.session,
+          revisions: payload.revisions,
+          clearReview: true,
+          revisionStatus: payload.result?.status ?? "APPLIED",
+        },
+      });
+      clearReviewFocus();
+      dispatch({ type: "setBanner", payload: "Selected changes applied." });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Failed to apply changes: ${getErrorMessage(error)}` });
     }
   }
 
@@ -1232,6 +1424,7 @@ export function AppProvider({ children }: PropsWithChildren) {
           },
         });
       }
+      clearReviewFocus();
       dispatch({ type: "setBanner", payload: "Revision rejected." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to reject revision: ${getErrorMessage(error)}` });
@@ -1268,9 +1461,49 @@ export function AppProvider({ children }: PropsWithChildren) {
           revisionStatus: payload.result?.status ?? "REJECTED",
         },
       });
+      clearReviewFocus();
       dispatch({ type: "setBanner", payload: "Rolled back to the previous fidelity-preserving revision." });
     } catch (error) {
       dispatch({ type: "setBanner", payload: `Failed to roll back revision: ${getErrorMessage(error)}` });
+    }
+  }
+
+  async function restoreRevisionCheckpoint(revisionId: string) {
+    if (!selectedDocument?.documentSessionId || !revisionId) {
+      return;
+    }
+
+    if (selectedDocument.currentRevisionId === revisionId) {
+      dispatch({ type: "setBanner", payload: "This checkpoint is already active." });
+      return;
+    }
+
+    try {
+      dispatch({ type: "setBanner", payload: "Restoring checkpoint…" });
+      const payload = await restoreRevisionInBackend({
+        settings: state.settings,
+        revisionId,
+      });
+
+      const refreshedHtml = payload.html ?? payload.sourceHtml ?? undefined;
+      if (!refreshedHtml) {
+        throw new Error("The backend did not return refreshed document HTML after restore.");
+      }
+
+      dispatch({
+        type: "setDocumentProjection",
+        payload: {
+          documentId: selectedDocument.id,
+          html: refreshedHtml,
+          sourceHtml: payload.sourceHtml ?? payload.html ?? null,
+          session: payload.session,
+          revisions: payload.revisions,
+        },
+      });
+      clearReviewFocus();
+      dispatch({ type: "setBanner", payload: `Restored checkpoint ${revisionId}.` });
+    } catch (error) {
+      dispatch({ type: "setBanner", payload: `Failed to restore checkpoint: ${getErrorMessage(error)}` });
     }
   }
 
@@ -1367,6 +1600,11 @@ export function AppProvider({ children }: PropsWithChildren) {
     void syncChatSnapshot(compactedChat, "Failed to sync compacted chat to backend:");
   }
 
+  function requestCompactNextTurn() {
+    forceCompactNextRef.current = true;
+    dispatch({ type: "setBanner", payload: "The next assistant request will compact session context." });
+  }
+
   function createNewChat() {
     if (!selectedDocument) {
       return;
@@ -1391,17 +1629,62 @@ export function AppProvider({ children }: PropsWithChildren) {
 
   function selectChat(chatId: string | null) {
     dispatch({ type: "selectChat", payload: chatId });
+    dispatch({ type: "setFocusedChatMessage", payload: null });
+    dispatch({ type: "setComposer", payload: "" });
+  }
+
+  function focusReviewChange(changeId: string, blockId?: string | null) {
+    setReviewFocus((current) => ({
+      changeId,
+      blockId: blockId ?? null,
+      requestId: current.requestId + 1,
+    }));
+  }
+
+  function clearReviewFocus() {
+    setReviewFocus((current) => ({
+      changeId: null,
+      blockId: null,
+      requestId: current.requestId + 1,
+    }));
+  }
+
+  function focusChatMessage(chatId: string, messageId: string) {
+    if (import.meta.env.DEV) {
+      try {
+        // eslint-disable-next-line no-console
+        console.debug("[focusChatMessage] called", { chatId, messageId, at: new Date().toISOString() });
+        // eslint-disable-next-line no-console
+        console.debug(new Error().stack);
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    dispatch({ type: "selectChat", payload: chatId });
+    dispatch({ type: "setFocusedChatMessage", payload: messageId });
     dispatch({ type: "setComposer", payload: "" });
   }
 
   function deleteChat(chatId: string) {
     if (state.settings.apiBaseUrl.trim()) {
-      deleteChatApi(state.settings.apiBaseUrl, chatId).catch((error) => {
-        console.error("Failed to delete chat from backend:", error);
-        dispatch({ type: "setBanner", payload: "Chat deleted locally, but failed to remove from backend." });
+      deleteChatApi(state.settings.apiBaseUrl, chatId).then(() => {
+        dispatch({ type: "deleteChat", payload: chatId });
+      }).catch((error) => {
+        const status = (error as { status?: number })?.status;
+        if (status === 409) {
+          dispatch({
+            type: "setBanner",
+            payload: error.message || "Please apply or discard the pending change before deleting this chat.",
+          });
+        } else {
+          console.error("Failed to delete chat from backend:", error);
+          dispatch({ type: "setBanner", payload: "Failed to delete chat. Please try again." });
+        }
       });
+    } else {
+      dispatch({ type: "deleteChat", payload: chatId });
     }
-    dispatch({ type: "deleteChat", payload: chatId });
   }
 
   function renameChat(chatId: string, newName: string) {
@@ -1420,8 +1703,12 @@ export function AppProvider({ children }: PropsWithChildren) {
       value={{
         state,
         selectedDocument,
+        selectedReview,
         selectedChat,
         currentMessages,
+        focusedReviewBlockId: reviewFocus.blockId,
+        focusedReviewChangeId: reviewFocus.changeId,
+        focusedReviewRequestId: reviewFocus.requestId,
         importFiles,
         removeDocument,
         selectDocument,
@@ -1433,15 +1720,21 @@ export function AppProvider({ children }: PropsWithChildren) {
         retryMessage,
         cancelRequest,
         applyStagedRevision,
+        applyPartialStagedRevision,
         rejectStagedRevision,
         rollbackCurrentRevision,
+        restoreRevisionCheckpoint,
         updateSelectedDocumentHtml,
         exportDocument,
         clearBanner,
         clearChat,
         compactCurrentChat,
+        requestCompactNextTurn,
         createNewChat,
         selectChat,
+        focusReviewChange,
+        clearReviewFocus,
+        focusChatMessage,
         deleteChat,
         renameChat,
       }}

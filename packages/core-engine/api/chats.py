@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from config import settings
 from services.chat_store import SQLiteChatStore
+from services.document_store import SQLiteDocumentStore
 
 router = APIRouter()
 
@@ -19,6 +20,11 @@ def get_chat_store() -> SQLiteChatStore:
         settings.chat_database_path,
         legacy_json_path=settings.legacy_chats_path,
     )
+
+
+@lru_cache(maxsize=1)
+def _get_document_store() -> SQLiteDocumentStore:
+    return SQLiteDocumentStore(settings.chat_database_path)
 
 
 class ChatMessage(BaseModel):
@@ -94,8 +100,26 @@ async def update_chat(
 
 
 @router.delete("/chats/{chat_id}")
-async def delete_chat(chat_id: str, store: SQLiteChatStore = Depends(get_chat_store)):
-    """Delete a chat."""
+async def delete_chat(
+    chat_id: str,
+    store: SQLiteChatStore = Depends(get_chat_store),
+    doc_store: SQLiteDocumentStore = Depends(_get_document_store),
+):
+    """Delete a chat. Blocked if the document has a pending unapplied revision."""
+    chat = store.get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    document_id: str | None = chat.get("documentId")
+    if document_id:
+        document = doc_store.get_document(document_id)
+        if document:
+            revision_status = document.get("revisionStatus") or ""
+            pending_revision_id = document.get("pendingRevisionId") or ""
+            if pending_revision_id or revision_status.upper() in ("PENDING", "STAGED"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Please apply or discard the pending change before deleting this chat.",
+                )
     store.delete_chat(chat_id)
     return {"ok": True}
 

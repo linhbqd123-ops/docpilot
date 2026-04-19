@@ -1,18 +1,49 @@
-import { Check, Download, FileCog, Lock, RefreshCw, Sparkles, Undo2, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+
+import { Download, FileCog, Lock, RefreshCw, Sparkles, Undo2 } from "lucide-react";
 
 import { useAppContext } from "@/app/context";
 import { DocumentCanvas } from "@/components/editor/DocumentCanvas";
+import { InlineReviewBar } from "@/components/review/InlineReviewBar";
+import { buildReviewChangeGroups, buildReviewDisplayHtml, collectAffectedBlockIds } from "@/lib/review";
 import { cn } from "@/lib/utils";
 
 export function DocumentWorkspace() {
   const {
     selectedDocument,
+    selectedReview,
     updateSelectedDocumentHtml,
     applyStagedRevision,
+    applyPartialStagedRevision,
     rejectStagedRevision,
     rollbackCurrentRevision,
     exportDocument,
+    focusedReviewBlockId,
+    focusedReviewChangeId,
+    focusedReviewRequestId,
+    focusReviewChange,
   } = useAppContext();
+
+  // Per-change rejection state: IDs of change groups the user has rejected.
+  // Everything NOT in this set is considered accepted. Resets when the pending revision changes.
+  const [rejectedChangeIds, setRejectedChangeIds] = useState<Set<string>>(new Set());
+
+  const pendingRevisionId = selectedDocument?.pendingRevisionId ?? null;
+  useEffect(() => {
+    setRejectedChangeIds(new Set());
+  }, [pendingRevisionId]);
+
+  const review = selectedReview ?? null;
+  const reviewChanges = useMemo(
+    () => (selectedDocument ? buildReviewChangeGroups(selectedDocument.html, review) : []),
+    [selectedDocument?.html, review],
+  );
+  const reviewDisplayHtml = useMemo(
+    () => (selectedDocument && review && focusedReviewChangeId
+      ? (buildReviewDisplayHtml(selectedDocument.html, review, focusedReviewChangeId) ?? undefined)
+      : undefined),
+    [selectedDocument?.html, review, focusedReviewChangeId],
+  );
 
   if (!selectedDocument) {
     return (
@@ -33,9 +64,61 @@ export function DocumentWorkspace() {
   const hasPendingRevision = Boolean(selectedDocument.pendingRevisionId);
   const isEditable = selectedDocument.status === "ready" && !isSessionBacked;
   const isFidelitySurface = isSessionBacked && Boolean(selectedDocument.sourceHtml);
+  const pendingStatus = (review?.status ?? selectedDocument.revisionStatus ?? "").toUpperCase();
+  const activeValidation = review?.preview?.validation ?? review?.validation;
+  const canApplyRevision = pendingStatus === "PENDING" && (activeValidation?.errors.length ?? 0) === 0;
+  const highlightedBlockIds = review ? collectAffectedBlockIds(review) : [];
+  const focusedReviewChange = reviewChanges.find((change) => change.id === focusedReviewChangeId) ?? null;
+  const effectiveFocusedBlockId = focusedReviewChange?.anchorBlockId ?? focusedReviewBlockId;
+
+  function handleAcceptChange(changeId: string) {
+    setRejectedChangeIds((prev) => {
+      const next = new Set(prev);
+      next.delete(changeId);
+      return next;
+    });
+  }
+
+  function handleRejectChange(changeId: string) {
+    setRejectedChangeIds((prev) => new Set([...prev, changeId]));
+  }
+
+  function handleApply() {
+    if (rejectedChangeIds.size === 0) {
+      // All accepted — use the standard path
+      void applyStagedRevision();
+      return;
+    }
+    // Collect accepted operation indices from non-rejected change groups
+    const acceptedIndices = reviewChanges
+      .filter((c) => !rejectedChangeIds.has(c.id))
+      .flatMap((c) => c.operations)
+      .map((op) => op.operationIndex)
+      .filter((idx): idx is number => idx != null);
+    void applyPartialStagedRevision(acceptedIndices);
+  }
+
+  const workspaceCanvas = (
+    <div className="scrollbar-thin h-full min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-10 py-10">
+      <DocumentCanvas
+        html={selectedDocument.html}
+        displayHtml={reviewDisplayHtml}
+        editable={isEditable}
+        variant={isSessionBacked ? "fidelity" : "editable"}
+        onCommit={updateSelectedDocumentHtml}
+        highlightedBlockIds={highlightedBlockIds}
+        focusedBlockId={effectiveFocusedBlockId}
+        focusRequestId={focusedReviewRequestId}
+        onBlockSelect={(blockId) => {
+          const matchingChange = reviewChanges.find((change) => change.anchorBlockId === blockId);
+          focusReviewChange(matchingChange?.id ?? `block:${blockId}`, blockId);
+        }}
+      />
+    </div>
+  );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-gradient-to-b from-transparent to-docpilot-panelAlt">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-gradient-to-b from-transparent to-docpilot-panelAlt">
       <div className="border-b border-docpilot-border px-6 py-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -56,20 +139,6 @@ export function DocumentWorkspace() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {hasPendingRevision ? (
-              <>
-                <button type="button" className="action-button-primary" onClick={() => void applyStagedRevision()}>
-                  <Check size={14} /> Apply
-                </button>
-                <button type="button" className="action-button" onClick={() => void rejectStagedRevision()}>
-                  <X size={14} /> Reject
-                </button>
-              </>
-            ) : (
-              <button type="button" className="action-button" disabled={!isSessionBacked}>
-                <Sparkles size={14} /> {isSessionBacked ? "No staged revision" : "Local editing only"}
-              </button>
-            )}
             {isSessionBacked && selectedDocument.currentRevisionId ? (
               <button type="button" className="action-button" onClick={() => void rollbackCurrentRevision()}>
                 <Undo2 size={14} /> Roll back
@@ -109,6 +178,10 @@ export function DocumentWorkspace() {
                 <span className="inline-flex items-center gap-2 text-docpilot-warning">
                   <Undo2 size={14} /> review mode is non-destructive until you apply it
                 </span>
+              ) : reviewChanges.length > 0 ? (
+                <span className="inline-flex items-center gap-2 text-docpilot-muted">
+                  <Sparkles size={14} /> select a change to inspect it in the document surface
+                </span>
               ) : isSessionBacked ? (
                 <span className="inline-flex items-center gap-2 text-docpilot-muted">
                   <Sparkles size={14} /> use the assistant to stage structured revisions
@@ -117,13 +190,22 @@ export function DocumentWorkspace() {
             </div>
           </div>
 
-          <div className="scrollbar-thin flex-1 overflow-auto px-10 py-10">
-            <DocumentCanvas
-              html={selectedDocument.html}
-              editable={isEditable}
-              variant={isSessionBacked ? "fidelity" : "editable"}
-              onCommit={updateSelectedDocumentHtml}
-            />
+          <div className="relative min-h-0 flex-1 overflow-hidden">
+            {workspaceCanvas}
+
+            {hasPendingRevision && review ? (
+              <InlineReviewBar
+                changes={reviewChanges}
+                focusedChangeId={focusedReviewChangeId}
+                canApply={canApplyRevision}
+                rejectedChangeIds={rejectedChangeIds}
+                onApply={handleApply}
+                onReject={() => void rejectStagedRevision()}
+                onAcceptChange={handleAcceptChange}
+                onRejectChange={handleRejectChange}
+                onSelectChange={(change) => focusReviewChange(change.id, change.anchorBlockId)}
+              />
+            ) : null}
           </div>
         </>
       )}

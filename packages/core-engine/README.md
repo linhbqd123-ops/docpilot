@@ -36,10 +36,6 @@ Interactive docs are available at `http://localhost:8000/docs`.
 
 Provider-specific keys and defaults live in `.env.example`.
 
-## Notes about Qdrant
-
-Qdrant is not integrated directly into `core-engine`. Semantic indexing and retrieval stay inside `doc-mcp`, because that is where the canonical document tree and revision lifecycle live.# DocPilot Core Engine
-
 Python FastAPI service that acts as the **AI gateway** for the DocPilot desktop app.
 
 - Exposes the MCP-backed `/api/agent/*` contract for ask / review / apply flows
@@ -142,6 +138,7 @@ See `.env.example` for all options. Key ones:
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama URL |
 | `OLLAMA_DEFAULT_MODEL` | `llama3.2` | Model to use |
 | `AGENT_MAX_INPUT_TOKENS` | `6000` | Approximate hard cap for assembled input tokens per LLM request |
+| `AGENT_MAX_OUTPUT_TOKENS` | `4096` | Default cap for completion tokens so reasoning-heavy models still reach a visible answer |
 | `AGENT_SESSION_CONTEXT_BUDGET_TOKENS` | `4200` | Soft budget for chat history and loop transcript before compaction |
 | `AGENT_TOOL_RESULT_BUDGET_TOKENS` | `2200` | Approximate per-batch allowance for tool results injected back into the prompt |
 | `AGENT_MAX_TOOL_BATCH_SIZE` | `4` | Maximum number of tools the model may request in one batch |
@@ -154,13 +151,14 @@ See `.env.example` for all options. Key ones:
 
 The desktop client may also override these values per request through `agentConfig` in `/api/agent/turn` and `/api/agent/turn/stream`.
 
-## Debug traces
+## Traces and logs
 
-`core-engine` now writes detailed JSONL traces to `packages/core-engine/debug/core-engine-flow.jsonl`.
+`core-engine` writes structured JSONL traces to the centralized `logs/` folder by default.
 
-- Each request carries `X-DocPilot-Trace-Id` so a single turn can be correlated across desktop, core-engine, and doc-mcp logs.
-- Frontend-originated debug events are persisted to `packages/desktop/debug/desktop-flow.jsonl` through `POST /api/debug/frontend`.
-- LLM requests are logged with the full prompt/messages assembled by the orchestrator, plus full model outputs and doc-mcp request/response payloads.
+- Info traces: `logs/core-engine-info.jsonl` — general request/response and operational events.
+- Error traces: `logs/core-engine-error.jsonl` — final exception handlers and error records.
+- Frontend-originated debug events are accepted via `POST /api/debug/frontend` and persisted to `logs/desktop-info.jsonl` (errors go to `logs/desktop-error.jsonl`).
+- LLM requests are logged with request/response details, trace IDs (`X-DocPilot-Trace-Id`), and caller context to help correlate turns across desktop, core-engine, and doc-mcp.
 
 ## Frontend integration notes
 

@@ -39,6 +39,18 @@ function asString(value: unknown) {
   return typeof value === "string" && value.trim() ? value : "";
 }
 
+function asScalarString(value: unknown) {
+  if (typeof value === "string" && value.trim()) {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return "";
+}
+
 function asNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -75,6 +87,18 @@ function formatTokenBreakdown(parts: {
 
 function formatRequestCount(value: number) {
   return `${value} AI req${value === 1 ? "" : "s"}`;
+}
+
+function defaultRequestPurpose(phase?: string | null) {
+  if (phase === "plan_revision") {
+    return "Prepare revision proposal";
+  }
+
+  if (phase === "agent_loop") {
+    return "Reason about next step";
+  }
+
+  return "Compose final answer";
 }
 
 function estimateTokenCount(text: string) {
@@ -116,13 +140,13 @@ function startCase(value: string) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function activityKey(activity: ToolActivity) {
+function activityMergeKey(activity: ToolActivity) {
   return [
-    asString(activity.tool) || "tool",
-    asString(activity.phase),
-    asString(activity.requestIndex ?? activity.request_index),
-    asString(activity.blockId ?? activity.block_id),
-    asString(activity.revisionId ?? activity.revision_id),
+    asScalarString(activity.tool) || "tool",
+    asScalarString(activity.phase),
+    asScalarString(activity.requestIndex ?? activity.request_index),
+    asScalarString(activity.blockId ?? activity.block_id),
+    asScalarString(activity.sessionId ?? activity.session_id),
   ].join(":");
 }
 
@@ -211,13 +235,17 @@ function activityDetail(activity: ToolActivity) {
   }
 
   if (tool === "get_analysis_html" && event === "tool_finished") {
-    return "Compact analysis HTML loaded for additional AI context";
+    return "Optimized analysis HTML loaded for additional AI context";
   }
 
   if (tool === "tool_batch") {
     const execution = asString(activity.execution);
+    const batchReason = asString(activity.batchReason ?? activity.batch_reason);
     const toolCount = asNumber(activity.completedToolCount ?? activity.toolCount);
-    const parts = [execution ? `${execution} batch` : "tool batch"];
+    const parts = [batchReason || (execution ? `${execution} batch` : "tool batch")];
+    if (batchReason && execution) {
+      parts.push(`${execution} batch`);
+    }
     if (toolCount !== null) {
       parts.push(`${toolCount} tool${toolCount === 1 ? "" : "s"}`);
     }
@@ -283,7 +311,7 @@ function buildInferenceSteps(activities: ToolActivity[] | undefined) {
   const stepIndexByKey = new Map<string, number>();
 
   for (const activity of activities ?? []) {
-    const key = activityKey(activity);
+    const key = activityMergeKey(activity);
     const nextStep: InferenceStep = {
       key,
       label: activityLabel(activity),
@@ -323,6 +351,37 @@ function noticeText(notice: AgentNotice) {
   return [notice.message, ...(notice.items ?? [])].filter(Boolean).join("\n").trim();
 }
 
+function reasoningText(activity: ToolActivity | undefined) {
+  if (!activity) {
+    return "";
+  }
+  return asString(activity.reasoningText ?? activity.reasoning_text);
+}
+
+function reasoningActivityMap(activities: ToolActivity[] | undefined) {
+  let fallbackIndex = 0;
+  const entries = new Map<number, ToolActivity>();
+
+  (activities ?? []).forEach((activity) => {
+    if (asString(activity.tool) !== "llm_inference") {
+      return;
+    }
+
+    fallbackIndex += 1;
+    const requestIndex = asNumber(activity.requestIndex ?? activity.request_index) ?? fallbackIndex;
+    if (requestIndex === null) {
+      return;
+    }
+
+    const existing = entries.get(requestIndex);
+    if (!existing || reasoningText(activity) || asString(activity.event) === "tool_finished") {
+      entries.set(requestIndex, activity);
+    }
+  });
+
+  return entries;
+}
+
 function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number): TurnUsageRequest | null {
   const event = asString(activity.event);
   if (asString(activity.tool) !== "llm_inference" || (event !== "tool_started" && event !== "tool_finished")) {
@@ -336,6 +395,7 @@ function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number)
   return {
     requestIndex,
     phase: asString(activity.phase) || null,
+    requestPurpose: asString(activity.requestPurpose ?? activity.request_purpose) || defaultRequestPurpose(asString(activity.phase) || null),
     provider: asString(activity.provider) || undefined,
     providerDisplayName: asString(activity.providerDisplayName ?? activity.provider_display_name) || undefined,
     model: asString(activity.model) || null,
@@ -347,6 +407,10 @@ function usageRequestFromActivity(activity: ToolActivity, fallbackIndex: number)
       asNumber(activity.estimatedTotalTokens ?? activity.estimated_total_tokens)
       ?? estimatedInputTokens + estimatedOutputTokens,
   };
+}
+
+function requestPurposeLabel(request: TurnUsageRequest) {
+  return request.requestPurpose || defaultRequestPurpose(request.phase);
 }
 
 function usageFromToolActivity(activities: ToolActivity[] | undefined): TurnUsage | undefined {
@@ -545,6 +609,7 @@ export function ChatPanel() {
   const [expandedTraceIds, setExpandedTraceIds] = useState<Record<string, boolean>>({});
   const dividerRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const messageRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const documentChats = selectedDocument
     ? state.chats
@@ -599,6 +664,55 @@ export function ChatPanel() {
     });
   }, [currentMessages]);
 
+  useEffect(() => {
+    const focusedId = state.focusedChatMessageId;
+    if (!selectedChat || focusedId == null) {
+      return;
+    }
+
+    let raf1: number | null = null;
+    let raf2: number | null = null;
+
+    const doScroll = () => {
+      const target = messageRefs.current[focusedId];
+      if (!target) {
+        return;
+      }
+
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => {
+          try {
+            if (import.meta.env.DEV) {
+              try {
+                // eslint-disable-next-line no-console
+                console.debug("[ChatPanel] scrollIntoView", {
+                  messageId: state.focusedChatMessageId,
+                  chatId: selectedChat?.id,
+                  at: new Date().toISOString(),
+                });
+                // eslint-disable-next-line no-console
+                console.debug(new Error().stack);
+              } catch (err) {
+                // ignore
+              }
+            }
+
+            target.scrollIntoView({ behavior: "smooth", block: "center" });
+          } catch (err) {
+            // ignore
+          }
+        });
+      });
+    };
+
+    doScroll();
+
+    return () => {
+      if (raf1 !== null) cancelAnimationFrame(raf1);
+      if (raf2 !== null) cancelAnimationFrame(raf2);
+    };
+  }, [currentMessages, selectedChat, state.focusedChatMessageId, state.focusedChatMessageRequestId]);
+
   const canSend =
     Boolean(selectedDocument) &&
     selectedDocument?.status === "ready" &&
@@ -636,7 +750,6 @@ export function ChatPanel() {
       <div className="border-b border-docpilot-border">
         <div className="flex items-center justify-between px-4 py-4">
           <div className="min-w-0">
-            <p className="text-xs uppercase tracking-[0.22em] text-docpilot-muted">Assistant</p>
             {selectedDocument && selectedChat ? (
               <div className="mt-2 flex min-w-0 items-start gap-3">
                 <button
@@ -700,16 +813,6 @@ export function ChatPanel() {
               </>
             ) : null}
             <div className="flex items-center gap-2 rounded-full border border-docpilot-border bg-docpilot-panelAlt px-3 py-1 text-xs text-docpilot-muted">
-              <span
-                className={cn(
-                  "h-2.5 w-2.5 rounded-full",
-                  state.connection.status === "online"
-                    ? "bg-docpilot-success"
-                    : state.connection.status === "checking"
-                      ? "bg-docpilot-warning"
-                      : "bg-docpilot-danger",
-                )}
-              />
               <span>{state.settings.provider}</span>
             </div>
           </div>
@@ -793,13 +896,23 @@ export function ChatPanel() {
           const usage = messageUsage(message, currentMessages.slice(0, index), state.settings);
           const noticeTexts = (message.notices ?? []).map(noticeText).filter(Boolean);
           const targetSummary = summarizeRequestTargets(usage);
+          const reasoningByRequest = reasoningActivityMap(message.toolActivity);
           const hasTraceDetails = !isUser && (inferenceSteps.length > 0 || noticeTexts.length > 0 || Boolean(usage?.requests.length));
           const traceExpanded = expandedTraceIds[message.id] ?? false;
           const showMessageMeta = !isUser && Boolean(message.mode || targetSummary || usage?.requestCount || hasTokenEstimate(usage) || hasTraceDetails);
           const messageBody = message.content || (message.status === "streaming" && inferenceSteps.length === 0 ? "Waiting for response..." : "");
 
           return (
-            <article key={message.id} className="flex gap-3">
+            <article
+              key={message.id}
+              ref={(node) => {
+                messageRefs.current[message.id] = node;
+              }}
+              className={cn(
+                "flex gap-3 rounded-3xl px-2 py-2 transition duration-300",
+                state.focusedChatMessageId === message.id ? "bg-docpilot-accentSoft/60 ring-1 ring-docpilot-accent/30" : "",
+              )}
+            >
               <div
                 className={cn(
                   "mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border",
@@ -892,7 +1005,8 @@ export function ChatPanel() {
                               <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted">
                                 API request #{request.requestIndex}
                               </p>
-                              <p className="mt-1 text-xs font-medium text-docpilot-textStrong">{requestTargetLabel(request)}</p>
+                              <p className="mt-1 text-xs font-medium text-docpilot-textStrong">{requestPurposeLabel(request)}</p>
+                              <p className="mt-1 text-xs text-docpilot-muted">{requestTargetLabel(request)}</p>
                               <p className="mt-1 text-xs text-docpilot-muted">
                                 {phaseLabel(request.phase ?? "")}
                                 {request.estimatedTotalTokens > 0
@@ -903,6 +1017,16 @@ export function ChatPanel() {
                                   })}`
                                   : ""}
                               </p>
+                              {reasoningText(reasoningByRequest.get(request.requestIndex)) ? (
+                                <div className="mt-2 rounded-lg border border-docpilot-border/80 bg-docpilot-surface px-2.5 py-2">
+                                  <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-docpilot-muted">
+                                    Reasoning trace
+                                  </p>
+                                  <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap text-xs leading-5 text-docpilot-muted">
+                                    {reasoningText(reasoningByRequest.get(request.requestIndex))}
+                                  </div>
+                                </div>
+                              ) : null}
                             </div>
                           ))}
                         </div>

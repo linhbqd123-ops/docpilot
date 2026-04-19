@@ -1,9 +1,0 @@
-log_level: INFO
-
-storage:
-  storage_path: ./storage
-
-service:
-  http_port: 6333
-  grpc_port: 6334
-  enable_tls: false

@@ -1,6 +1,8 @@
 package io.docpilot.mcp.store;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.docpilot.mcp.engine.anchor.AnchorService;
+import io.docpilot.mcp.engine.diff.DiffService;
 import com.zaxxer.hikari.HikariDataSource;
 import io.docpilot.mcp.config.AppConfig;
 import io.docpilot.mcp.config.AppProperties;
@@ -131,11 +133,13 @@ class SqliteStorePersistenceTest {
 
             RevisionService revisionService = new RevisionService(
                 new AcceptingPatchEngine(),
+                new DiffService(new AnchorService()),
                 context.revisionStore,
                 context.sessionStore,
                 new NoOpSemanticSearchService(),
                 new FidelityHtmlService(),
-                new AnalysisHtmlConverter()
+                new AnalysisHtmlConverter(),
+                new AppConfig().objectMapper()
             );
 
             Patch patch = patch("patch-stage", "session-stage", null);

@@ -1,0 +1,12 @@
+Config: agent_auto_compact_session / agent_auto_compact_threshold — thay đổi trigger hoặc tắt auto‑compact. Xem config.py:86-112.
+Session budgets: tăng agent_session_context_budget_tokens hoặc agent_max_input_tokens để cho phép nhiều context hơn trước khi compact. Xem config.py:86-112.
+Orchestrator compaction logic: hàm compaction và các tham số (kích thước chuỗi, số mục giữ lại) ở turn_orchestrator.py — tăng max_chars / max_items để nén nhẹ hơn (giữ nhiều nội dung hơn). Xem turn_orchestrator.py:272-309 và turn_orchestrator.py:324-373.
+API schema: request field aliases autoCompactSession / autoCompactThreshold — backend nhận các giá trị từ client. Xem agent.py:58-59.
+Frontend controls / UI: client setting và nút Compact — để người dùng bật/tắt hoặc thủ công compact. Xem context.tsx:113-124 và context.tsx:1348-1367 và ChatPanel.tsx:686-690.
+Docs / env: README nêu biến môi trường AGENT_SESSION_CONTEXT_BUDGET_TOKENS và AGENT_AUTO_COMPACT_SESSION. Xem README.md:145-151.
+Tests / examples: debug logs và tests minh họa giá trị mặc định auto_compact_threshold=0.82 và compaction events. Xem core-engine-flow.jsonl và test_turn_orchestrator.py:419-471.
+Gợi ý nhanh để "to" conversation:
+
+Nếu muốn ít compaction: đặt agent_auto_compact_threshold lên cao (ví dụ 0.95–0.99) hoặc agent_auto_compact_session = False.
+Nếu muốn giữ nhiều context trước khi compact: tăng agent_session_context_budget_tokens (ví dụ từ 4200 → 8000).
+Nếu muốn giảm mức nén khi compact xảy ra: điều chỉnh _compact_text max_chars (tăng), và các max_items trong turn_orchestrator.py.

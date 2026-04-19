@@ -17,6 +17,12 @@ export function ConnectionPanel() {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   const [isSavingProviderUrl, setIsSavingProviderUrl] = useState(false);
 
+  // Model override state
+  const [modelOverride, setModelOverride] = useState("");
+  const [modelOverrideSaved, setModelOverrideSaved] = useState<string | null>(null);
+  const [modelOverrideError, setModelOverrideError] = useState("");
+  const [isSavingModelOverride, setIsSavingModelOverride] = useState(false);
+
   const selectedProviderInfo = getProviderDefinition(state.settings.provider);
   const selectedProviderStatus = statusMap[state.settings.provider];
   const currentSavedEndpoint = selectedProviderStatus?.endpoint?.trim() ?? "";
@@ -63,6 +69,36 @@ export function ConnectionPanel() {
     setProviderUrl(currentResolvedEndpoint);
     setProviderUrlError("");
   }, [currentResolvedEndpoint, state.settings.provider]);
+
+  // Load model override when provider changes
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadModelOverride() {
+      try {
+        const { data } = await apiClient.get<{ model_override: string | null }>(
+          `/api/keys/${state.settings.provider}/model-override`
+        );
+        if (!cancelled) {
+          const saved = data.model_override || null;
+          setModelOverrideSaved(saved);
+          setModelOverride(saved || "");
+          setModelOverrideError("");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          // Not an error if endpoint doesn't exist - just means no override saved
+          setModelOverrideSaved(null);
+          setModelOverride("");
+        }
+      }
+    }
+
+    loadModelOverride();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient, state.settings.provider]);
 
   async function reloadProviderStatus() {
     const { data } = await apiClient.get<{ providers: ProviderStatusPayload[] }>("/api/keys/list");
@@ -112,6 +148,48 @@ export function ConnectionPanel() {
       setProviderUrlError(error instanceof Error ? error.message : "Failed to reset provider URL");
     } finally {
       setIsSavingProviderUrl(false);
+    }
+  }
+
+  async function saveModelOverride() {
+    const trimmedModel = modelOverride.trim();
+
+    setIsSavingModelOverride(true);
+    setModelOverrideError("");
+
+    try {
+      const { data } = await apiClient.post<{ model_override: string | null }>(
+        `/api/keys/${state.settings.provider}/model-override`,
+        {
+          model_override: trimmedModel,
+        }
+      );
+      setModelOverrideSaved(data.model_override || null);
+      setModelOverride(data.model_override || "");
+    } catch (error) {
+      setModelOverrideError(error instanceof Error ? error.message : "Failed to save model override");
+    } finally {
+      setIsSavingModelOverride(false);
+    }
+  }
+
+  async function resetModelOverride() {
+    if (!modelOverrideSaved) {
+      setModelOverride("");
+      return;
+    }
+
+    setIsSavingModelOverride(true);
+    setModelOverrideError("");
+
+    try {
+      await apiClient.delete(`/api/keys/${state.settings.provider}/model-override`);
+      setModelOverrideSaved(null);
+      setModelOverride("");
+    } catch (error) {
+      setModelOverrideError(error instanceof Error ? error.message : "Failed to reset model override");
+    } finally {
+      setIsSavingModelOverride(false);
     }
   }
 
@@ -180,20 +258,45 @@ export function ConnectionPanel() {
           {providerUrlError ? <p className="mt-2 text-xs text-docpilot-dangerText">{providerUrlError}</p> : null}
 
           <label className="mb-2 mt-4 block text-xs uppercase tracking-[0.18em] text-docpilot-muted">
-            Model override <span className="normal-case text-docpilot-muted/60">(optional)</span>
+            Model override <span className="normal-case text-docpilot-muted/60">(optional, per-provider)</span>
           </label>
           <div className="relative">
             <Cpu size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-docpilot-muted" />
             <input
-              value={state.settings.modelOverride}
-              onChange={(event) => updateSettings({ modelOverride: event.target.value })}
+              value={modelOverride}
+              onChange={(event) => setModelOverride(event.target.value)}
               className="field-shell w-full pl-10"
-              placeholder="e.g. llama3.2, gpt-4o-mini, anthropic/claude-3-haiku"
+              placeholder="e.g. llama3.2, gpt-4o-mini, claude-3-haiku"
+              disabled={isLoadingConfig || isSavingModelOverride}
             />
           </div>
-          <p className="mt-1.5 text-xs text-docpilot-muted">
-            Leave blank to use the backend default for the selected provider.
-          </p>
+          <div className="mt-2 flex items-center justify-between gap-3 text-xs text-docpilot-muted">
+            <span>
+              {modelOverrideSaved
+                ? `Using saved override: ${modelOverrideSaved}`
+                : "Using backend default for this provider."}
+            </span>
+            {modelOverrideSaved ? <span className="badge">saved</span> : null}
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              className="action-button-primary"
+              onClick={() => void saveModelOverride()}
+              disabled={isLoadingConfig || isSavingModelOverride || modelOverride === (modelOverrideSaved || "")}
+            >
+              <Save size={14} /> Save Model
+            </button>
+            <button
+              type="button"
+              className="action-button"
+              onClick={() => void resetModelOverride()}
+              disabled={isLoadingConfig || isSavingModelOverride || !modelOverrideSaved}
+            >
+              <RotateCcw size={14} /> Reset
+            </button>
+          </div>
+          {modelOverrideError ? <p className="mt-2 text-xs text-docpilot-dangerText">{modelOverrideError}</p> : null}
         </div>
 
         <div className="panel-card p-4">

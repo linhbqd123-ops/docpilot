@@ -9,7 +9,7 @@ function ThemeIcon({ themeId }: { themeId: string }) {
 }
 
 export function SettingsPanel() {
-  const { state, updateSettings } = useAppContext();
+  const { state, updateSettings, requestCompactNextTurn } = useAppContext();
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -70,12 +70,8 @@ export function SettingsPanel() {
             </label>
             <input
               type="number"
-              min={1000}
-              step={1000}
               value={state.settings.requestTimeoutMs}
-              onChange={(event) =>
-                updateSettings({ requestTimeoutMs: Math.max(1000, Number(event.target.value) || 1000) })
-              }
+              onChange={(event) => updateSettings({ requestTimeoutMs: Number(event.target.value) })}
               className="field-shell w-full"
             />
           </div>
@@ -87,14 +83,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={1200}
-                step={100}
                 value={state.settings.agentConfig.maxInputTokens}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      maxInputTokens: Math.max(1200, Number(event.target.value) || 1200),
+                      maxInputTokens: Number(event.target.value),
                     },
                   })
                 }
@@ -108,14 +102,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={400}
-                step={100}
                 value={state.settings.agentConfig.sessionContextBudgetTokens}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      sessionContextBudgetTokens: Math.max(400, Number(event.target.value) || 400),
+                      sessionContextBudgetTokens: Number(event.target.value),
                     },
                   })
                 }
@@ -129,14 +121,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={240}
-                step={100}
                 value={state.settings.agentConfig.toolResultBudgetTokens}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      toolResultBudgetTokens: Math.max(240, Number(event.target.value) || 240),
+                      toolResultBudgetTokens: Number(event.target.value),
                     },
                   })
                 }
@@ -150,15 +140,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={1}
-                max={8}
-                step={1}
                 value={state.settings.agentConfig.maxToolBatchSize}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      maxToolBatchSize: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                      maxToolBatchSize: Number(event.target.value),
                     },
                   })
                 }
@@ -172,15 +159,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={1}
-                max={8}
-                step={1}
                 value={state.settings.agentConfig.maxParallelTools}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      maxParallelTools: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                      maxParallelTools: Number(event.target.value),
                     },
                   })
                 }
@@ -194,15 +178,12 @@ export function SettingsPanel() {
               </label>
               <input
                 type="number"
-                min={1}
-                max={8}
-                step={1}
                 value={state.settings.agentConfig.maxHeavyToolsPerTurn}
                 onChange={(event) =>
                   updateSettings({
                     agentConfig: {
                       ...state.settings.agentConfig,
-                      maxHeavyToolsPerTurn: Math.max(1, Math.min(8, Number(event.target.value) || 1)),
+                      maxHeavyToolsPerTurn: Number(event.target.value),
                     },
                   })
                 }
@@ -230,6 +211,8 @@ export function SettingsPanel() {
               className="h-4 w-4 rounded border-docpilot-border bg-transparent"
             />
           </label>
+
+          {/* 'Compact now (next request)' removed — compaction is available on the chat toolbar */}
 
           <label className="subtle-card flex items-center justify-between gap-4 px-4 py-3 text-sm text-docpilot-text">
             <span>

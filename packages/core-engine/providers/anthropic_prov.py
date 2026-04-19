@@ -1,8 +1,8 @@
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import anthropic
 
-from providers.base import BaseProvider
+from providers.base import BaseProvider, ProviderStreamChunk
 
 
 class AnthropicProvider(BaseProvider):
@@ -31,11 +31,13 @@ class AnthropicProvider(BaseProvider):
         self,
         messages: list[dict],
         model: str | None = None,
-    ) -> AsyncIterator[str]:
+        response_format: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[ProviderStreamChunk]:
         system, conv = self._split_messages(messages)
         async with self.client.messages.stream(
             model=model or self.default_model,
-            max_tokens=8096,
+            max_tokens=max_tokens or 8096,
             system=system,
             messages=conv,
         ) as stream:
@@ -46,11 +48,13 @@ class AnthropicProvider(BaseProvider):
         self,
         messages: list[dict],
         model: str | None = None,
+        response_format: dict[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         system, conv = self._split_messages(messages)
         response = await self.client.messages.create(
             model=model or self.default_model,
-            max_tokens=8096,
+            max_tokens=max_tokens or 8096,
             system=system,
             messages=conv,
         )

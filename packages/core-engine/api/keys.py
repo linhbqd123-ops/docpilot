@@ -6,6 +6,7 @@ Provides secure APIs for:
 - Checking if a provider has a configured key
 - Listing all providers with their key status
 - Deleting keys
+- Managing per-provider model overrides
 """
 
 from typing import Optional
@@ -16,8 +17,12 @@ from pathlib import Path
 from config import settings
 from crypto import encrypt_key, decrypt_key, mask_key
 from providers import REGISTRY
+from services.provider_settings_store import ProviderSettingsStore
 
 router = APIRouter(prefix="/api/keys", tags=["keys"])
+
+# Initialize provider settings store
+_provider_settings_store = ProviderSettingsStore(settings.chat_database_path)
 
 KNOWN_PROVIDERS = [
     "openai",
@@ -389,4 +394,87 @@ async def delete_endpoint(provider: str) -> dict:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete endpoint: {str(e)}"
+        )
+
+
+# ============================================================================
+# Model Override Endpoints
+# ============================================================================
+
+class ModelOverrideRequest(BaseModel):
+    """Request to set model override for a provider."""
+    model_override: str  # Empty string to clear
+
+
+class ModelOverrideResponse(BaseModel):
+    """Response with model override info."""
+    provider: str
+    model_override: Optional[str] = None
+
+
+@router.post("/{provider}/model-override", response_model=ModelOverrideResponse)
+async def set_model_override(provider: str, request: ModelOverrideRequest) -> ModelOverrideResponse:
+    """
+    Set model override for a provider.
+    
+    Pass empty string to clear the override.
+    """
+    provider = provider.strip().lower()
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    try:
+        model_value = request.model_override.strip() if request.model_override else ""
+        _provider_settings_store.set_model_override(provider, model_value if model_value else None)
+        
+        saved_model = _provider_settings_store.get_model_override(provider)
+        
+        return ModelOverrideResponse(
+            provider=provider,
+            model_override=saved_model,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to set model override: {str(e)}"
+        )
+
+
+@router.get("/{provider}/model-override", response_model=ModelOverrideResponse)
+async def get_model_override(provider: str) -> ModelOverrideResponse:
+    """Get model override for a provider."""
+    provider = provider.strip().lower()
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    try:
+        model = _provider_settings_store.get_model_override(provider)
+        return ModelOverrideResponse(
+            provider=provider,
+            model_override=model,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get model override: {str(e)}"
+        )
+
+
+@router.delete("/{provider}/model-override", response_model=ModelOverrideResponse)
+async def delete_model_override(provider: str) -> ModelOverrideResponse:
+    """Delete model override for a provider."""
+    provider = provider.strip().lower()
+    if provider not in KNOWN_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    try:
+        _provider_settings_store.set_model_override(provider, None)
+        return ModelOverrideResponse(
+            provider=provider,
+            model_override=None,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete model override: {str(e)}"
         )

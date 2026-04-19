@@ -60,6 +60,33 @@ public class HtmlProjectionService {
         return html.toString();
     }
 
+    /**
+     * Renders a specific list of {@link DocumentComponent} objects to an HTML fragment.
+     * Useful for projecting a context window (a few blocks around a target block) without
+     * rendering the entire document.
+     *
+     * @param blocks ordered list of components to render
+     * @return HTML fragment string (no {@code <html>/<head>} wrapper)
+     */
+    public String projectBlockList(List<DocumentComponent> blocks) {
+        if (blocks == null || blocks.isEmpty()) return "";
+        StringBuilder html = new StringBuilder();
+        for (DocumentComponent block : blocks) {
+            renderComponent(block, html, 0);
+        }
+        return html.toString();
+    }
+
+    /**
+     * Renders a single {@link DocumentComponent} to an HTML fragment.
+     */
+    public String projectBlock(DocumentComponent block) {
+        if (block == null) return "";
+        StringBuilder html = new StringBuilder();
+        renderComponent(block, html, 0);
+        return html.toString();
+    }
+
     // -----------------------------------------------------------------------
     //  Recursive rendering
     // -----------------------------------------------------------------------
